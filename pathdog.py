@@ -7,7 +7,9 @@ import sys
 from pathdog.loader import load_zip
 from pathdog.graph import build_graph, resolve_target, prune_to_target, graph_stats
 from pathdog.pathfinder import find_paths, suggest_similar_nodes
-from pathdog.report import render_markdown, render_html, print_paths_console
+from pathdog.report import (
+    render_markdown_multi, render_html_multi, print_paths_console,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -17,19 +19,24 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 examples:
-  pathdog -z corp_bloodhound.zip -u john.doe@corp.local
-  pathdog -z dump.zip -u svc_backup@evil.corp -k 5 -f html -o report
-  pathdog -z ad.zip -u alice@acme.local -t "DOMAIN ADMINS@acme.local" -v
+  # Single user, single ZIP
+  pathdog -z corp.zip -u john.doe@corp.local
+
+  # Two owned users, two ZIPs merged into one graph
+  pathdog -z dump1.zip -z dump2.zip -u john@corp.local -u svc_backup@corp.local
+
+  # All options
+  pathdog -z ad.zip -u alice@acme.local -t "DOMAIN ADMINS@acme.local" -k 5 -f html -v
         """,
     )
-    p.add_argument("-z", "--zip", required=True, metavar="FILE",
-                   help="Path to BloodHound ZIP export")
-    p.add_argument("-u", "--user", required=True, metavar="USER",
-                   help="Owned user identity (e.g. john.doe@corp.local)")
+    p.add_argument("-z", "--zip", required=True, metavar="FILE", action="append",
+                   dest="zips", help="BloodHound ZIP export (repeat for multiple ZIPs)")
+    p.add_argument("-u", "--user", required=True, metavar="USER", action="append",
+                   dest="users", help="Owned user identity (repeat for multiple users)")
     p.add_argument("-t", "--target", default=None, metavar="TARGET",
                    help="Target node — default: auto-detect DOMAIN ADMINS")
     p.add_argument("-k", "--paths", type=int, default=3, metavar="K",
-                   help="Number of paths to find (default: 3)")
+                   help="Number of paths to find per user (default: 3)")
     p.add_argument("-o", "--output", default="pathdog_report", metavar="BASENAME",
                    help="Output file base name (default: pathdog_report)")
     p.add_argument("-f", "--format", choices=["md", "html", "both"], default="both",
@@ -43,7 +50,6 @@ def resolve_source(G, user: str):
     """Find the user node; return (node_id, exact_match: bool)."""
     if user in G:
         return user, True
-    # Case-insensitive substring search
     user_lower = user.lower()
     for nid in G.nodes:
         if user_lower == nid.lower():
@@ -51,7 +57,6 @@ def resolve_source(G, user: str):
         name = G.nodes[nid].get("name", "")
         if user_lower == name.lower():
             return nid, True
-    # Partial match
     for nid in G.nodes:
         if user_lower in nid.lower():
             return nid, False
@@ -65,18 +70,27 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    # ── Load ──────────────────────────────────────────────────────────────────
-    print(f"[*] Loading {args.zip} ...")
-    try:
-        nodes, edges = load_zip(args.zip)
-    except ValueError as exc:
-        print(f"[!] {exc}", file=sys.stderr)
-        return 1
+    # ── Load & merge all ZIPs ─────────────────────────────────────────────────
+    all_nodes: list[dict] = []
+    all_edges: list[dict] = []
 
-    print(f"[*] Loaded {len(nodes)} nodes, {len(edges)} edges")
+    for zip_path in args.zips:
+        print(f"[*] Loading {zip_path} ...")
+        try:
+            nodes, edges = load_zip(zip_path)
+        except ValueError as exc:
+            print(f"[!] {exc}", file=sys.stderr)
+            return 1
+        print(f"    → {len(nodes)} nodes, {len(edges)} edges")
+        all_nodes.extend(nodes)
+        all_edges.extend(edges)
 
-    # ── Build graph ───────────────────────────────────────────────────────────
-    G = build_graph(nodes, edges)
+    if len(args.zips) > 1:
+        print(f"[*] Merged: {len(all_nodes)} nodes, {len(all_edges)} edges (before dedup)")
+
+    # ── Build graph (deduplication happens here) ──────────────────────────────
+    G = build_graph(all_nodes, all_edges)
+    print(f"[*] Graph: {G.number_of_nodes()} unique nodes, {G.number_of_edges()} unique edges")
 
     # ── Resolve target ────────────────────────────────────────────────────────
     target = resolve_target(G, args.target)
@@ -90,21 +104,7 @@ def main() -> int:
         return 1
     print(f"[*] Target node: {target}")
 
-    # ── Resolve source ────────────────────────────────────────────────────────
-    source, exact = resolve_source(G, args.user)
-    if not source:
-        print(f"[!] User '{args.user}' not found in graph.", file=sys.stderr)
-        suggestions = suggest_similar_nodes(G, args.user, top_n=3)
-        if suggestions:
-            print("    Did you mean one of:", file=sys.stderr)
-            for s in suggestions:
-                print(f"      - {s}", file=sys.stderr)
-        return 1
-    if not exact:
-        print(f"[~] Fuzzy match for '{args.user}' → '{source}'")
-    print(f"[*] Source node: {source}")
-
-    # ── Prune graph ───────────────────────────────────────────────────────────
+    # ── Prune once for all users ──────────────────────────────────────────────
     pruned = prune_to_target(G, target)
     stats = graph_stats(G, pruned)
 
@@ -117,41 +117,70 @@ def main() -> int:
             f"reduction: {stats['reduction_pct']}%"
         )
 
-    if source not in pruned:
-        src_display = G.nodes[source].get("name", source)
-        tgt_display = G.nodes[target].get("name", target)
-        print(
-            f"\n[!] No path found from '{src_display}' to '{tgt_display}'.\n"
-            "    The owned user may not have any edges leading to DA in this dump."
-        )
-        return 0
+    # ── Resolve all owned users ───────────────────────────────────────────────
+    sources: list[str] = []
+    for user in args.users:
+        source, exact = resolve_source(G, user)
+        if not source:
+            print(f"[!] User '{user}' not found in graph.", file=sys.stderr)
+            suggestions = suggest_similar_nodes(G, user, top_n=3)
+            if suggestions:
+                print("    Did you mean one of:", file=sys.stderr)
+                for s in suggestions:
+                    print(f"      - {s}", file=sys.stderr)
+            continue
+        if not exact:
+            print(f"[~] Fuzzy match for '{user}' → '{source}'")
+        print(f"[*] Owned user: {source}")
+        sources.append(source)
 
-    # ── Find paths ────────────────────────────────────────────────────────────
-    print(f"[*] Computing up to {args.paths} path(s) ...")
-    try:
-        paths = find_paths(pruned, source, target, k=args.paths)
-    except ValueError as exc:
-        print(f"[!] {exc}", file=sys.stderr)
+    if not sources:
+        print("[!] No valid owned users found. Aborting.", file=sys.stderr)
         return 1
 
+    # ── Find paths for each owned user ────────────────────────────────────────
+    # Collect all results: list of (source, paths)
+    all_results: list[tuple[str, list]] = []
+
+    for source in sources:
+        if source not in pruned:
+            src_display = G.nodes[source].get("name", source)
+            print(f"\n[!] No path from '{src_display}' — not connected to DA subgraph.")
+            all_results.append((source, []))
+            continue
+
+        print(f"[*] Computing up to {args.paths} path(s) from {source} ...")
+        try:
+            paths = find_paths(pruned, source, target, k=args.paths)
+        except ValueError as exc:
+            print(f"[!] {exc}", file=sys.stderr)
+            all_results.append((source, []))
+            continue
+        all_results.append((source, paths))
+
     # ── Console output ────────────────────────────────────────────────────────
-    print_paths_console(paths, G, source, target)
+    for source, paths in all_results:
+        if len(sources) > 1:
+            src_label = G.nodes[source].get("name", source)
+            print(f"\n{'═' * 60}")
+            print(f"  Owned user: {src_label}")
+            print(f"{'═' * 60}")
+        print_paths_console(paths, G, source, target)
 
     # ── Write reports ─────────────────────────────────────────────────────────
     written: list[str] = []
+    report_stats = stats if args.verbose else None
 
     if args.fmt in ("md", "both"):
         md_path = f"{args.output}.md"
-        md_content = render_markdown(paths, G, source, target, stats if args.verbose else None)
         with open(md_path, "w", encoding="utf-8") as fh:
-            fh.write(md_content)
+            fh.write(render_markdown_multi(all_results, G, target, report_stats))
         written.append(md_path)
 
     if args.fmt in ("html", "both"):
         html_path = f"{args.output}.html"
-        html_content = render_html(paths, G, source, target, stats if args.verbose else None)
         with open(html_path, "w", encoding="utf-8") as fh:
-            fh.write(html_content)
+            fh.write(render_html_multi(all_results, G, target, report_stats))
         written.append(html_path)
 
     if written:

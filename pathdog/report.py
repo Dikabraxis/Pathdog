@@ -406,3 +406,142 @@ def render_html(
         .replace("{{PATH_COUNT}}", path_count)
         .replace("{{PATHS_BLOCK}}", paths_block)
     )
+
+
+# ── Multi-user renderers ──────────────────────────────────────────────────────
+
+def render_markdown_multi(
+    results: list[tuple[str, list]],
+    G: "nx.DiGraph",
+    target: str,
+    stats: dict | None = None,
+) -> str:
+    """Render a combined Markdown report for multiple owned users."""
+    if len(results) == 1:
+        source, paths = results[0]
+        return render_markdown(paths, G, source, target, stats)
+
+    lines: list[str] = []
+    lines.append("# Pathdog — Multi-User Attack Path Report\n")
+    tgt_label = _display_name(G, target)
+    lines.append(f"**Target:** `{tgt_label}`\n")
+
+    if stats:
+        lines.append("## Graph Statistics\n")
+        lines.append("| Metric | Value |")
+        lines.append("|--------|-------|")
+        lines.append(f"| Total nodes | {stats['total_nodes']} |")
+        lines.append(f"| Total edges | {stats['total_edges']} |")
+        lines.append(f"| Pruned nodes (reachable) | {stats['pruned_nodes']} |")
+        lines.append(f"| Pruned edges | {stats['pruned_edges']} |")
+        lines.append(f"| Node reduction | {stats['reduction_pct']}% |")
+        lines.append("")
+
+    for source, paths in results:
+        src_label = _display_name(G, source)
+        lines.append(f"\n---\n\n## Owned: `{src_label}`\n")
+        # Inline the single-user content (skip the repeated header)
+        single = render_markdown(paths, G, source, target, stats=None)
+        # Drop the first 3 lines (title + source/target meta)
+        lines.append("\n".join(single.split("\n")[3:]))
+
+    return "\n".join(lines)
+
+
+_HTML_MULTI_TEMPLATE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pathdog — Multi-User Attack Path Report</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --accent: #58a6ff; --accent2: #3fb950; --warn: #d29922;
+    --danger: #f85149; --text: #c9d1d9; --muted: #8b949e;
+    --code-bg: #1f2428;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; font-size: 14px; line-height: 1.6; padding: 2rem; }
+  h1 { color: var(--accent); font-size: 1.6rem; margin-bottom: 0.5rem; }
+  h2 { color: var(--accent); font-size: 1.2rem; margin: 1.5rem 0 0.75rem; border-bottom: 1px solid var(--border); padding-bottom: 0.4rem; }
+  .meta { color: var(--muted); margin-bottom: 1.5rem; }
+  .meta span { color: var(--accent); font-family: monospace; }
+  .user-section { margin-bottom: 2.5rem; }
+  .user-banner { background: #1c2128; border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 1rem; margin-bottom: 1rem; font-family: monospace; color: var(--accent2); font-size: 0.95rem; }
+  .stats-table { border-collapse: collapse; margin-bottom: 1.5rem; }
+  .stats-table th, .stats-table td { border: 1px solid var(--border); padding: 0.4rem 0.8rem; }
+  .stats-table th { background: var(--surface); color: var(--accent); }
+  .stats-table td { font-family: monospace; }
+  .no-path { background: var(--surface); border: 1px solid var(--danger); border-radius: 6px; padding: 1rem 1.25rem; color: var(--danger); margin-top: 1rem; }
+  .path-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 1.5rem; overflow: hidden; }
+  .path-header { background: #1c2128; padding: 0.6rem 1rem; display: flex; align-items: center; gap: 1rem; border-bottom: 1px solid var(--border); }
+  .path-badge { background: var(--accent); color: #0d1117; font-weight: 700; font-size: 0.8rem; padding: 0.2rem 0.6rem; border-radius: 20px; }
+  .path-meta { color: var(--muted); font-size: 0.85rem; }
+  .path-meta strong { color: var(--text); }
+  .chain { padding: 1.25rem 1.5rem; }
+  .chain-node { display: flex; align-items: center; gap: 0.5rem; margin: 0.1rem 0; }
+  .node-pill { background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px; padding: 0.25rem 0.6rem; font-family: monospace; font-size: 0.85rem; color: var(--text); white-space: nowrap; }
+  .node-pill.source { border-color: var(--accent2); color: var(--accent2); }
+  .node-pill.target { border-color: var(--danger); color: var(--danger); }
+  .chain-edge { padding: 0.15rem 0 0.15rem 1rem; }
+  .edge-connector { display: flex; align-items: center; gap: 0.5rem; font-size: 0.8rem; color: var(--muted); }
+  .edge-line { width: 2px; height: 14px; background: var(--border); flex-shrink: 0; }
+  .rel-badge { background: #21262d; border: 1px solid var(--border); border-radius: 20px; padding: 0.1rem 0.55rem; font-family: monospace; font-size: 0.78rem; color: var(--warn); }
+  .weight-badge { font-size: 0.72rem; color: var(--muted); }
+  .exploit-block { margin: 0.4rem 0 0.6rem 1.6rem; border-left: 2px solid var(--border); padding-left: 0.75rem; }
+  .exploit-desc { font-size: 0.82rem; color: var(--muted); margin-bottom: 0.3rem; font-style: italic; }
+  .exploit-commands { background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px; padding: 0.6rem 0.9rem; font-family: monospace; font-size: 0.8rem; white-space: pre; overflow-x: auto; color: var(--accent2); line-height: 1.7; }
+  .exploit-commands .comment { color: var(--muted); }
+  footer { margin-top: 2rem; color: var(--muted); font-size: 0.8rem; border-top: 1px solid var(--border); padding-top: 1rem; }
+  footer a { color: var(--accent); text-decoration: none; }
+</style>
+</head>
+<body>
+<h1>&#128021; Pathdog — Multi-User Attack Path Report</h1>
+<div class="meta">Target: <span>{{TARGET_NAME}}</span></div>
+{{STATS_BLOCK}}
+{{SECTIONS}}
+<footer>Generated by <a href="https://github.com/dikabraxis/pathdog">pathdog</a></footer>
+</body>
+</html>
+"""
+
+
+def render_html_multi(
+    results: list[tuple[str, list]],
+    G: "nx.DiGraph",
+    target: str,
+    stats: dict | None = None,
+) -> str:
+    """Render a combined HTML report for multiple owned users."""
+    if len(results) == 1:
+        source, paths = results[0]
+        return render_html(paths, G, source, target, stats)
+
+    target_name = _escape(_display_name(G, target))
+    stats_block = _STATS_TEMPLATE.format(**stats) if stats else ""
+
+    sections: list[str] = []
+    for source, paths in results:
+        src_label = _escape(_display_name(G, source))
+        parts = [
+            f'<div class="user-section">',
+            f'<div class="user-banner">&#128100; Owned: {src_label} &nbsp;&#8594;&nbsp; {target_name}</div>',
+        ]
+        if not paths:
+            parts.append(_NO_PATH_TEMPLATE.format(source=src_label, target=target_name))
+        else:
+            parts.append(f'<h2>Paths Found: {len(paths)}</h2>')
+            for i, p in enumerate(paths, 1):
+                parts.append(_render_path_html(p, G, i))
+        parts.append("</div>")
+        sections.append("\n".join(parts))
+
+    return (
+        _HTML_MULTI_TEMPLATE
+        .replace("{{TARGET_NAME}}", target_name)
+        .replace("{{STATS_BLOCK}}", stats_block)
+        .replace("{{SECTIONS}}", "\n<hr style='border-color:var(--border);margin:2rem 0'>\n".join(sections))
+    )
