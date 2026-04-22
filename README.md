@@ -19,12 +19,13 @@ Python 3.10+ required.
 ## Usage
 
 ```
-usage: pathdog [-h] -z FILE [-z FILE ...] -u USER [-u USER ...] [-t TARGET]
+usage: pathdog [-h] -z FILE [FILE ...] -u USER [USER ...] [-t TARGET]
                [-k K] [-o BASENAME] [-f {md,html,both}] [-v]
 
 arguments:
-  -z / --zip       BloodHound ZIP export — repeat to merge multiple dumps
-  -u / --user      Owned user identity — repeat for multiple owned users
+  -z / --zip       One or more BloodHound ZIP exports (space-separated)
+  -u / --user      One or more owned users (space-separated), or a .txt file
+                   with one identity per line (lines starting with # ignored)
   -t / --target    Target node (default: auto-detect DOMAIN ADMINS)
   -k / --paths     Number of paths to find per user (default: 3)
   -o / --output    Output file base name (default: pathdog_report)
@@ -41,19 +42,28 @@ arguments:
 python pathdog.py -z corp_bloodhound.zip -u john.doe@corp.local
 ```
 
-**Two owned users, two ZIPs merged into one graph:**
+**Multiple ZIPs and users on one line:**
 ```bash
-python pathdog.py -z dump1.zip -z dump2.zip -u john.doe@corp.local -u svc_backup@corp.local
+python pathdog.py -z dump1.zip dump2.zip -u john.doe@corp.local svc_backup@corp.local
 ```
 
-**5 paths, HTML only, verbose stats:**
+**Load owned users from a text file:**
 ```bash
-python pathdog.py -z megacorp_dump.zip -u svc_backup@megacorp.local -k 5 -f html -v -o megacorp_report
+python pathdog.py -z dump1.zip dump2.zip -u owned_users.txt -k 5 -f html -v -o full_report
 ```
 
 **Explicit target, Markdown only:**
 ```bash
 python pathdog.py -z acme_export.zip -u alice@acme.local -t "DOMAIN ADMINS@acme.local" -f md -o acme_paths
+```
+
+`owned_users.txt` format — one identity per line, `#` for comments:
+```
+# Compromised accounts
+john.doe@corp.local
+svc_backup@corp.local
+# DC machine account
+DC01$@corp.local
 ```
 
 ---
@@ -72,12 +82,9 @@ is found in a single pass even if `userA` and `userB` came from different ZIPs �
 
 **Typical multi-user workflow:**
 ```bash
-# Collect two BloodHound dumps (e.g. from two different machines)
 python pathdog.py \
-  -z bloodhound_ws01.zip \
-  -z bloodhound_ws02.zip \
-  -u alice@corp.local \
-  -u bob@corp.local \
+  -z bloodhound_ws01.zip bloodhound_ws02.zip \
+  -u owned_users.txt \
   -k 5 -f html -v -o full_report
 ```
 

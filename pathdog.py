@@ -19,20 +19,15 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 examples:
-  # Single user, single ZIP
   pathdog -z corp.zip -u john.doe@corp.local
-
-  # Two owned users, two ZIPs merged into one graph
-  pathdog -z dump1.zip -z dump2.zip -u john@corp.local -u svc_backup@corp.local
-
-  # All options
-  pathdog -z ad.zip -u alice@acme.local -t "DOMAIN ADMINS@acme.local" -k 5 -f html -v
+  pathdog -z dump1.zip dump2.zip -u john@corp.local svc_backup@corp.local
+  pathdog -z dump1.zip dump2.zip -u owned_users.txt -k 5 -f html -v
         """,
     )
-    p.add_argument("-z", "--zip", required=True, metavar="FILE", action="append",
-                   dest="zips", help="BloodHound ZIP export (repeat for multiple ZIPs)")
-    p.add_argument("-u", "--user", required=True, metavar="USER", action="append",
-                   dest="users", help="Owned user identity (repeat for multiple users)")
+    p.add_argument("-z", "--zip", required=True, metavar="FILE", nargs="+",
+                   dest="zips", help="BloodHound ZIP export(s), e.g. -z a.zip b.zip")
+    p.add_argument("-u", "--user", required=True, metavar="USER", nargs="+",
+                   dest="users", help="Owned user(s) or a .txt file with one user per line")
     p.add_argument("-t", "--target", default=None, metavar="TARGET",
                    help="Target node — default: auto-detect DOMAIN ADMINS")
     p.add_argument("-k", "--paths", type=int, default=3, metavar="K",
@@ -69,6 +64,26 @@ def resolve_source(G, user: str):
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+
+    # ── Expand user list (support .txt file) ──────────────────────────────────
+    expanded_users: list[str] = []
+    for entry in args.users:
+        if entry.lower().endswith(".txt"):
+            try:
+                with open(entry, encoding="utf-8") as fh:
+                    file_users = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
+                print(f"[*] Loaded {len(file_users)} user(s) from {entry}")
+                expanded_users.extend(file_users)
+            except OSError as exc:
+                print(f"[!] Cannot read user file '{entry}': {exc}", file=sys.stderr)
+                return 1
+        else:
+            expanded_users.append(entry)
+    args.users = expanded_users
+
+    if not args.users:
+        print("[!] No owned users provided.", file=sys.stderr)
+        return 1
 
     # ── Load & merge all ZIPs ─────────────────────────────────────────────────
     all_nodes: list[dict] = []
