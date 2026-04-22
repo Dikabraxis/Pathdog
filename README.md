@@ -128,7 +128,7 @@ pathdog/
 │   ├── weights.py      # Edge weight table
 │   ├── pathfinder.py   # Path computation logic
 │   └── report.py       # Markdown + HTML report renderer
-├── main.py             # CLI entrypoint
+├── pathdog.py          # CLI entrypoint
 ├── requirements.txt
 └── README.md
 ```
