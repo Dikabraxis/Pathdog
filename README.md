@@ -35,17 +35,17 @@ arguments:
 
 **Basic scan — owned user to Domain Admin, top 3 paths, both report formats:**
 ```bash
-python main.py -z corp_bloodhound.zip -u john.doe@corp.local
+python pathdog.py -z corp_bloodhound.zip -u john.doe@corp.local
 ```
 
 **Find 5 paths, HTML only, with verbose graph stats:**
 ```bash
-python main.py -z megacorp_dump.zip -u svc_backup@megacorp.local -k 5 -f html -v -o megacorp_report
+python pathdog.py -z megacorp_dump.zip -u svc_backup@megacorp.local -k 5 -f html -v -o megacorp_report
 ```
 
 **Explicit target, Markdown report only:**
 ```bash
-python main.py -z acme_export.zip -u alice@acme.local -t "DOMAIN ADMINS@acme.local" -f md -o acme_paths
+python pathdog.py -z acme_export.zip -u alice@acme.local -t "DOMAIN ADMINS@acme.local" -f md -o acme_paths
 ```
 
 ---
