@@ -7,3 +7,4 @@ venv/
 dist/
 build/
 *.zip
+pathdog_report.*
