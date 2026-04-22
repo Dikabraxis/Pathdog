@@ -38,11 +38,7 @@ def find_paths(
     target: str,
     k: int = 3,
 ) -> list[PathResult]:
-    """Find up to *k* lowest-resistance paths from *source* to *target*.
-
-    Uses dijkstra for k=1, shortest_simple_paths for k>1.
-    Returns empty list if no path exists.
-    """
+    """Find up to *k* lowest-resistance paths. Returns [] if none exist."""
     if source not in G:
         raise ValueError(f"Source node not in graph: {source}")
     if target not in G:
@@ -69,25 +65,45 @@ def find_paths(
 
 
 def suggest_similar_nodes(G: nx.DiGraph, query: str, top_n: int = 3) -> list[str]:
-    """Return top_n node names/IDs most similar to *query* using fuzzy matching."""
+    """Return top_n node IDs most similar to *query*.
+
+    Prefers nodes of kind 'users' since -u expects user identities.
+    Falls back to all node types if not enough user matches.
+    """
     try:
         from thefuzz import process as fuzz_process
-        candidates: dict[str, str] = {}
-        for nid in G.nodes:
-            name = G.nodes[nid].get("name", nid)
-            candidates[name] = nid
-            if nid != name:
-                candidates[nid] = nid
-        hits = fuzz_process.extract(query, list(candidates.keys()), limit=top_n * 2)
+
+        def _candidates(kind_filter: str | None) -> dict[str, str]:
+            result: dict[str, str] = {}
+            for nid in G.nodes:
+                if kind_filter and G.nodes[nid].get("kind") != kind_filter:
+                    continue
+                name = G.nodes[nid].get("name", nid)
+                result[name] = nid
+                if nid != name:
+                    result[nid] = nid
+            return result
+
         seen: list[str] = []
-        for label, _score, *_ in hits:
-            nid = candidates[label]
-            if nid not in seen:
-                seen.append(nid)
-            if len(seen) >= top_n:
-                break
+        for kind in ("users", None):
+            cands = _candidates(kind)
+            hits = fuzz_process.extract(query, list(cands.keys()), limit=top_n * 2)
+            for label, _score, *_ in hits:
+                nid = cands[label]
+                if nid not in seen:
+                    seen.append(nid)
+                if len(seen) >= top_n:
+                    return seen
         return seen
+
     except ImportError:
         q = query.lower()
-        matches = [nid for nid in G.nodes if q in nid.lower()]
-        return matches[:top_n]
+        # Prefer user nodes
+        user_matches = [
+            nid for nid in G.nodes
+            if G.nodes[nid].get("kind") == "users" and q in nid.lower()
+        ]
+        if len(user_matches) >= top_n:
+            return user_matches[:top_n]
+        all_matches = [nid for nid in G.nodes if q in nid.lower()]
+        return all_matches[:top_n]
