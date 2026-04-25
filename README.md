@@ -27,7 +27,7 @@ python pathdog.py -z <dump.zip> -u <user> [options]
 | `-k N` | Number of paths per user (default `3`). |
 | `-o BASENAME` | Output base name (default `pathdog_report`). |
 | `-f md \| html \| both` | Report format (default `both`). |
-| `-l KIND` | List nodes and exit. `KIND` = `users`, `computers`, `groups`, `domains`, `all`. |
+| `-l KIND` | List nodes and exit. `KIND` = `users`, `computers`, `groups`, `domains`, `gpos`, `ous`, `all`. |
 | `-v` | Show graph statistics. |
 | `--no-fallback` | Disable intermediate-target suggestions. |
 | `--no-quickwins` | Disable the domain-wide quick-wins scan. |
