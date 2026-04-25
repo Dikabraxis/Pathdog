@@ -21,8 +21,8 @@ python pathdog.py -z <dump.zip> -u <user> [options]
 
 | Flag | Description |
 |------|-------------|
-| `-z FILE [FILE ...]` | BloodHound ZIP export(s). Multiple ZIPs are merged. |
-| `-u USER [USER ...]` | Owned user(s). Accepts `name@domain.local` or a `.txt` file. |
+| `-z FILE` | BloodHound ZIP export(s). Multiple ZIPs are merged. |
+| `-u USER` | Owned user(s). Accepts `name@domain.local` or a `.txt` file. |
 | `-t TARGET` | Target node. Defaults to auto-detected `DOMAIN ADMINS`. |
 | `-k N` | Number of paths per user (default `3`). |
 | `-o BASENAME` | Output base name (default `pathdog_report`). |
