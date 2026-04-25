@@ -2,7 +2,9 @@
 """pathdog — BloodHound attack path analyzer CLI."""
 
 import argparse
+import os
 import sys
+from datetime import datetime
 
 from pathdog.loader import load_zip
 from pathdog.graph import build_graph, resolve_target, prune_to_target, graph_stats
@@ -242,14 +244,19 @@ def main() -> int:
     written: list[str] = []
     report_stats = stats if args.verbose else None
 
+    base = args.output
+    extensions = [e for e in (".md", ".html") if args.fmt in (e[1:], "both")]
+    if any(os.path.exists(f"{base}{ext}") for ext in extensions):
+        base = f"{base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
     if args.fmt in ("md", "both"):
-        md_path = f"{args.output}.md"
+        md_path = f"{base}.md"
         with open(md_path, "w", encoding="utf-8") as fh:
             fh.write(render_markdown_multi(all_results, G, target, report_stats))
         written.append(md_path)
 
     if args.fmt in ("html", "both"):
-        html_path = f"{args.output}.html"
+        html_path = f"{base}.html"
         with open(html_path, "w", encoding="utf-8") as fh:
             fh.write(render_html_multi(all_results, G, target, report_stats))
         written.append(html_path)
