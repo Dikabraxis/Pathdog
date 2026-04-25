@@ -94,48 +94,85 @@ def _path_yields_dcsync(G: "nx.DiGraph", path: "PathResult") -> bool:
     return False
 
 
+# ── ANSI colors ───────────────────────────────────────────────────────────────
+
+import os
+import sys
+
+_USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+
+def _c(text: str, code: str) -> str:
+    return f"\x1b[{code}m{text}\x1b[0m" if _USE_COLOR else text
+
+
+def _bold(s):    return _c(s, "1")
+def _dim(s):     return _c(s, "2")
+def _red(s):     return _c(s, "31")
+def _green(s):   return _c(s, "32")
+def _yellow(s):  return _c(s, "33")
+def _blue(s):    return _c(s, "34")
+def _magenta(s): return _c(s, "35")
+def _cyan(s):    return _c(s, "36")
+
+
 def print_paths_console(
     paths: list["PathResult"],
     G: "nx.DiGraph",
     source: str,
     target: str,
 ) -> None:
+    """Print only the BEST path: ASCII chain + commands grouped by step."""
+    src = _display_name(G, source)
+    tgt = _display_name(G, target)
+
     if not paths:
-        src = _display_name(G, source)
-        tgt = _display_name(G, target)
-        print(
-            f"\n[!] No path found from {src} to {tgt}.\n"
-            "    The owned user may not have any edges leading to DA in this dump."
-        )
+        print(f"\n  {_red('✗')} No path from {_cyan(src)} to {_magenta(tgt)}.")
         return
 
-    for i, path in enumerate(paths, 1):
-        print(f"\n[PATH {i}] Total weight: {path.total_weight} | Hops: {path.hops}")
-        print("─" * 50)
-        actor = _display_name(G, path.nodes[0])
-        flags = _node_flags(G, path.nodes[0])
-        flag_str = f"  ⚑ {', '.join(flags)}" if flags else ""
-        print(f"{actor}{flag_str}")
-        for edge in path.edges:
-            rel = edge["relation"]
-            dst_name = _display_name(G, edge["dst"])
-            dst_flags = _node_flags(G, edge["dst"])
-            flag_str = f"  ⚑ {', '.join(dst_flags)}" if dst_flags else ""
-            arrow = f"  └─[{rel}]"
-            pad = max(1, 42 - len(arrow))
-            print(f"{arrow}{'─' * pad}► {dst_name}{flag_str}")
+    best = paths[0]
+    dcsync_tag = _magenta(" [DCSync]") if _path_yields_dcsync(G, best) else ""
+    print(f"\n  {_green('✓')} {_cyan(src)} {_dim('→')} {_magenta(tgt)}"
+          f"   {_dim(f'{best.hops} hops, weight {best.total_weight}')}{dcsync_tag}")
 
-            cmd, next_actor = _edge_commands(G, edge, actor)
-            print(f"     ↳ {cmd.description}")
-            for c in cmd.commands:
-                print(f"       $ {c}")
-            if next_actor != actor:
-                print(f"     → now operating as: {next_actor}")
-            actor = next_actor
+    # ASCII chain
+    print()
+    print(f"    {_cyan(src)}")
+    for edge in best.edges:
+        rel = _yellow(f"[{edge['relation']}]")
+        dst = _display_name(G, edge["dst"])
+        dst_styled = _magenta(dst) if edge["dst"] == target else dst
+        print(f"      {_dim('└─')}{rel}{_dim('──►')} {dst_styled}")
 
-        if _path_yields_dcsync(G, path):
-            print("\n  ✦ This path grants DCSync — domain compromise. Use the secretsdump")
-            print("    command above to harvest all hashes (krbtgt → Golden Ticket forever).")
+    # Commands grouped by actionable step
+    print()
+    actor = src
+    step = 0
+    for edge in best.edges:
+        if edge["relation"] in ("MemberOf", "Contains"):
+            continue
+        step += 1
+        cmd, next_actor = _edge_commands(G, edge, actor)
+        rel = edge["relation"]
+        dst = _display_name(G, edge["dst"])
+        print(f"    {_bold(_blue(f'# Step {step}: {rel} on {dst}'))}  "
+              f"{_dim(f'(as {actor})')}")
+        for c in cmd.commands or []:
+            if c.startswith("#"):
+                print(f"      {_dim(c)}")
+            else:
+                print(f"      {_green('$')} {c}")
+        if next_actor != actor:
+            print(f"      {_magenta('→')} now operating as: {_cyan(next_actor)}")
+        print()
+        actor = next_actor
+
+    # Footer pointer to extras
+    extras = []
+    if len(paths) > 1:
+        extras.append(f"+{len(paths) - 1} more paths")
+    if extras:
+        print(f"  {_dim('  ' + ' · '.join(extras) + '  →  see HTML report')}")
 
 
 def print_intermediate_targets(
@@ -143,24 +180,10 @@ def print_intermediate_targets(
     source: str,
     suggestions: list[dict],
 ) -> None:
-    """Console output for fallback intermediate-target suggestions."""
+    """One-line summary; details in the HTML report."""
     if not suggestions:
         return
-    src_name = _display_name(G, source)
-    print(f"\n[+] No DA path — best intermediate targets reachable from {src_name}:")
-    for i, s in enumerate(suggestions, 1):
-        nid = s["node"]
-        path = s["path"]
-        score = s["score"]
-        d_name = _display_name(G, nid)
-        kind = G.nodes[nid].get("kind", "?")
-        flags = _node_flags(G, nid)
-        flag_str = f"  ⚑ {', '.join(flags)}" if flags else ""
-        hops = path.hops if path else "?"
-        print(f"  {i:>2}. [score={score:>3}] {d_name} ({kind}) — {hops} hop(s){flag_str}")
-        if path:
-            chain = " → ".join(_display_name(G, n) for n in path.nodes)
-            print(f"        path: {chain}")
+    print(f"  {_dim('  ' + str(len(suggestions)) + ' intermediate target(s) reachable  →  see HTML report')}")
 
 
 def print_pivot_candidates(
@@ -168,25 +191,19 @@ def print_pivot_candidates(
     pivots: list[dict],
     limit: int = 10,
 ) -> None:
-    """Console output: principals with a path to DA that you can compromise out-of-band."""
+    """Compact summary: top pivot + count; details in the HTML report."""
     if not pivots:
         return
-    print(f"\n[+] Pivot candidates — compromise any of these and you inherit a path to DA:")
-    for i, pv in enumerate(pivots[:limit], 1):
-        nid = pv["node"]
-        ptd = pv["path_to_da"]
-        name = _display_name(G, nid)
-        kind = G.nodes[nid].get("kind", "?")
-        flags = _node_flags(G, nid)
-        flag_str = f"  ⚑ {', '.join(flags)}" if flags else ""
-        hops = ptd.hops if ptd else "?"
-        print(f"\n  {i:>2}. [score={pv['score']:>3}] {name} ({kind}) — {hops} hops to DA{flag_str}")
-        print(f"        Attack vectors: {', '.join(pv['vectors'])}")
-        for c in pv["vector_commands"][:3]:
-            print(f"          $ {c}")
-        if ptd:
-            chain = " → ".join(_display_name(G, n) for n in ptd.nodes)
-            print(f"        Onward path: {chain}")
+    top = pivots[0]
+    name = _display_name(G, top["node"])
+    ptd = top["path_to_da"]
+    hops = ptd.hops if ptd else "?"
+    vector = top["vectors"][0] if top["vectors"] else "out-of-band"
+    print()
+    print(f"  {_yellow('◆')} {_bold('Best pivot:')} {_cyan(name)} "
+          f"{_dim(f'({vector}, {hops} hops onward)')}")
+    if len(pivots) > 1:
+        print(f"  {_dim(f'  +{len(pivots) - 1} more pivot candidate(s)  →  see HTML report')}")
 
 
 def print_quickwins(
@@ -194,18 +211,15 @@ def print_quickwins(
     quickwins: dict[str, list["QuickWin"]],
     limit_per_cat: int = 5,
 ) -> None:
+    """One-line summary per category."""
     if not quickwins:
         return
-    print(f"\n[+] Domain-wide quick wins (independent of any owned user):")
-    for cat in sorted(quickwins):
+    print()
+    print(f"  {_yellow('◆')} {_bold('Domain quick-wins:')}")
+    for cat in sorted(quickwins, key=lambda c: -len(quickwins[c])):
         items = quickwins[cat]
-        print(f"\n  ◆ {cat}: {len(items)} candidate(s)")
-        for qw in items[:limit_per_cat]:
-            print(f"     • {qw.node_name} ({qw.node_kind}) — {qw.detail}")
-            for c in qw.commands[:2]:
-                print(f"        $ {c}")
-        if len(items) > limit_per_cat:
-            print(f"     … and {len(items) - limit_per_cat} more")
+        print(f"      {_yellow('•')} {cat} {_dim(f'({len(items)})')}")
+    print(f"  {_dim('  full details + commands  →  see HTML report')}")
 
 
 # ── Markdown ──────────────────────────────────────────────────────────────────
