@@ -3,6 +3,17 @@
 from itertools import islice
 import networkx as nx
 
+_STRUCTURAL = {"MemberOf", "Contains"}
+
+
+def _exploit_fingerprint(result: "PathResult") -> tuple:
+    """Tuple of (src, rel, dst) for non-structural edges only."""
+    return tuple(
+        (e["src"], e["relation"], e["dst"])
+        for e in result.edges
+        if e["relation"] not in _STRUCTURAL
+    )
+
 
 class PathResult:
     def __init__(self, nodes: list[str], edges: list[dict], weight: int):
@@ -56,8 +67,15 @@ def find_paths(
 
     try:
         gen = nx.shortest_simple_paths(G, source, target, weight="weight")
-        for path in islice(gen, k):
-            results.append(_path_to_result(G, path))
+        seen_fps: set[tuple] = set()
+        for path in islice(gen, k * 10):
+            r = _path_to_result(G, path)
+            fp = _exploit_fingerprint(r)
+            if fp not in seen_fps:
+                seen_fps.add(fp)
+                results.append(r)
+            if len(results) >= k:
+                break
     except (nx.NetworkXNoPath, nx.NodeNotFound):
         pass
 
