@@ -29,6 +29,9 @@ python pathdog.py -z <dump.zip> -u <user> [options]
   -f  Format: md | html | both    (défaut: both)
   -l  Lister les nœuds et quitter: users | computers | groups | domains | all
   -v  Stats du graphe
+  --no-fallback     Désactive les targets intermédiaires quand pas de path to DA
+  --no-quickwins    Désactive le scan AS-REP/Kerberoast/Unconstrained/LAPS/etc.
+  --fallback-top N  Max targets intermédiaires par user (défaut: 10)
 ```
 
 ---
@@ -78,6 +81,22 @@ john.doe@corp.local
 
 **Formats BloodHound** — supporte le format legacy (v4) et BloodHound CE (v5+) avec les arrays `Members`, `LocalAdmins`, `Sessions`, `AllowedToDelegate`, etc.
 
+**DCSync implicite** — quand un principal a `GetChanges` + `GetChangesAll` sur un domaine, Pathdog synthétise un edge `DCSync` (poids 2). Les edges seuls sont dépriorisés (poids 8) car non exploitables sans la paire.
+
+**Fallback intermediate targets** — si aucun chemin vers DA n'existe pour un user owned, Pathdog liste les nœuds high-value qu'il PEUT atteindre (DC, computers AdminCount, Tier 0 groups…) avec un score et le chemin Dijkstra associé.
+
+**Quick wins domain-wide** — scan automatique des Properties BloodHound pour surfacer :
+- AS-REP roastables (`dontreqpreauth=true`)
+- Kerberoastables (`hasspn=true`)
+- Unconstrained delegation
+- `passwordnotreqd`
+- LAPS-deployed computers
+- High-value & privileged-non-protected accounts
+- ADCS-vulnerable templates / CAs (ESC1-13, GoldenCert)
+- Domain Controllers (cibles de coercion)
+
+**Property flags inline** — chaque nœud du chemin est annoté avec ses propriétés exploitables (`AS-REP roastable`, `Unconstrained deleg.`, `HighValue`, `LAPS`, etc.).
+
 ---
 
 ## Exit codes
@@ -94,10 +113,11 @@ john.doe@corp.local
 
 | Weight | Edges |
 |--------|-------|
-| 1 | MemberOf, Contains |
-| 2 | GenericAll, DCSync, GetChangesAll, AllExtendedRights, AddMember, AddSelf, ReadLAPSPassword, SyncLAPSPassword, AdminTo, GPLink |
-| 3 | WriteDacl, WriteOwner, GenericWrite, Owns, ForceChangePassword, CanRDP, CanPSRemote, ExecuteDCOM, SQLAdmin, WriteSPN, TrustedBy |
+| 1 | MemberOf, Contains, DCFor |
+| 2 | GenericAll, DCSync, GetChangesAll, GetChanges, GetChangesInFilteredSet, AllExtendedRights, AddMember, AddSelf, ReadLAPSPassword, SyncLAPSPassword, AdminTo, GPLink, ADCSESC1/3/4/6/9/10/13, GoldenCert |
+| 3 | WriteDacl, WriteOwner, GenericWrite, Owns, ForceChangePassword, CanRDP, CanPSRemote, ExecuteDCOM, SQLAdmin, WriteSPN, TrustedBy, Enroll, AutoEnroll, ManageCA, ManageCertificates, WritePKI*, WriteGPLink, CoerceAndRelay*, *Trust |
 | 4 | AllowedToDelegate, HasSession, WriteAccountRestrictions, AddKeyCredentialLink |
 | 5 | AllowedToAct, *(inconnu)* |
+| 8 | GetChanges/GetChangesAll seul (non actionnable sans la paire) |
 
 Le weight représente la résistance d'exploitation — Dijkstra cherche le chemin de **weight total minimum** (le plus facile à exploiter de bout en bout).

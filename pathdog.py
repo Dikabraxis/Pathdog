@@ -8,9 +8,14 @@ from datetime import datetime
 
 from pathdog.loader import load_zip
 from pathdog.graph import build_graph, resolve_target, prune_to_target, graph_stats
-from pathdog.pathfinder import find_paths, suggest_similar_nodes
+from pathdog.pathfinder import (
+    find_paths, suggest_similar_nodes, find_intermediate_targets,
+    find_pivot_candidates,
+)
+from pathdog.quickwins import collect_all as collect_quickwins
 from pathdog.report import (
     render_markdown_multi, render_html_multi, print_paths_console,
+    print_intermediate_targets, print_quickwins, print_pivot_candidates,
 )
 
 
@@ -45,6 +50,16 @@ examples:
                    help="List nodes and exit. KIND: users, computers, groups, domains, all")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="Show graph statistics")
+    p.add_argument("--no-fallback", action="store_true",
+                   help="Disable intermediate-target suggestions when no DA path is found")
+    p.add_argument("--no-quickwins", action="store_true",
+                   help="Disable domain-wide quick-wins scan (AS-REP, Kerberoast, etc.)")
+    p.add_argument("--no-pivots", action="store_true",
+                   help="Disable pivot-candidate scan (principals with a path to DA, attackable out-of-band)")
+    p.add_argument("--fallback-top", type=int, default=10, metavar="N",
+                   help="Max intermediate targets per user (default: 10)")
+    p.add_argument("--pivots-top", type=int, default=15, metavar="N",
+                   help="Max pivot candidates to surface (default: 15)")
     return p
 
 
@@ -210,6 +225,7 @@ def main() -> int:
 
     # ── Find paths ────────────────────────────────────────────────────────────
     all_results: list[tuple[str, list]] = []
+    intermediates: dict[str, list[dict]] = {}
     any_path_found = False
 
     for source in sources:
@@ -217,6 +233,10 @@ def main() -> int:
             src_display = G.nodes[source].get("name", source)
             print(f"\n[!] No path from '{src_display}' — not connected to DA subgraph.")
             all_results.append((source, []))
+            if not args.no_fallback:
+                intermediates[source] = find_intermediate_targets(
+                    G, source, excluded={target}, top_n=args.fallback_top,
+                )
             continue
 
         print(f"[*] Computing up to {args.paths} path(s) from {source} ...")
@@ -229,7 +249,33 @@ def main() -> int:
 
         if paths:
             any_path_found = True
+        else:
+            if not args.no_fallback:
+                intermediates[source] = find_intermediate_targets(
+                    G, source, excluded={target}, top_n=args.fallback_top,
+                )
         all_results.append((source, paths))
+
+    # ── Quick wins (domain-wide, computed once) ───────────────────────────────
+    quickwins = None
+    if not args.no_quickwins:
+        print("[*] Scanning domain-wide quick wins ...")
+        quickwins = collect_quickwins(G)
+        if quickwins:
+            total = sum(len(v) for v in quickwins.values())
+            print(f"[*] Quick wins: {total} finding(s) across {len(quickwins)} categor(ies)")
+
+    # ── Pivot candidates (principals in DA-subgraph attackable out-of-band) ───
+    pivots: list[dict] = []
+    if not args.no_pivots:
+        print("[*] Scanning pivot candidates (path to DA + out-of-band vectors) ...")
+        pivots = find_pivot_candidates(
+            G, target, pruned,
+            top_n=args.pivots_top,
+            excluded_sources=set(sources),
+        )
+        if pivots:
+            print(f"[*] Pivot candidates: {len(pivots)} principal(s) with a path to DA + a compromise vector")
 
     # ── Console output ────────────────────────────────────────────────────────
     for source, paths in all_results:
@@ -239,6 +285,14 @@ def main() -> int:
             print(f"  Owned user: {src_label}")
             print(f"{'═' * 60}")
         print_paths_console(paths, G, source, target)
+        if not paths and source in intermediates:
+            print_intermediate_targets(G, source, intermediates[source])
+
+    if pivots:
+        print_pivot_candidates(G, pivots)
+
+    if quickwins:
+        print_quickwins(G, quickwins)
 
     # ── Write reports ─────────────────────────────────────────────────────────
     written: list[str] = []
@@ -252,13 +306,19 @@ def main() -> int:
     if args.fmt in ("md", "both"):
         md_path = f"{base}.md"
         with open(md_path, "w", encoding="utf-8") as fh:
-            fh.write(render_markdown_multi(all_results, G, target, report_stats))
+            fh.write(render_markdown_multi(
+                all_results, G, target, report_stats,
+                intermediates=intermediates, quickwins=quickwins, pivots=pivots,
+            ))
         written.append(md_path)
 
     if args.fmt in ("html", "both"):
         html_path = f"{base}.html"
         with open(html_path, "w", encoding="utf-8") as fh:
-            fh.write(render_html_multi(all_results, G, target, report_stats))
+            fh.write(render_html_multi(
+                all_results, G, target, report_stats,
+                intermediates=intermediates, quickwins=quickwins, pivots=pivots,
+            ))
         written.append(html_path)
 
     if written:

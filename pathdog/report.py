@@ -8,6 +8,7 @@ from .commands import get_commands, CommandSet
 if TYPE_CHECKING:
     import networkx as nx
     from .pathfinder import PathResult
+    from .quickwins import QuickWin
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -15,6 +16,30 @@ if TYPE_CHECKING:
 def _display_name(G: "nx.DiGraph", nid: str) -> str:
     name = G.nodes[nid].get("name", nid) if nid in G else nid
     return name if name else nid
+
+
+def _node_flags(G: "nx.DiGraph", nid: str) -> list[str]:
+    """Return short tags about a node (asreproast, kerberoast, unconstrained...)."""
+    if nid not in G:
+        return []
+    p = G.nodes[nid].get("props", {})
+    tags: list[str] = []
+    if p.get("dontreqpreauth"):
+        tags.append("AS-REP roastable")
+    if p.get("hasspn") and G.nodes[nid].get("kind") == "users":
+        if _display_name(G, nid).split("@", 1)[0].lower() != "krbtgt":
+            tags.append("Kerberoastable")
+    if p.get("unconstraineddelegation"):
+        tags.append("Unconstrained deleg.")
+    if p.get("passwordnotreqd"):
+        tags.append("PasswordNotReqd")
+    if p.get("admincount"):
+        tags.append("AdminCount=1")
+    if p.get("highvalue") or p.get("HighValue"):
+        tags.append("HighValue")
+    if p.get("haslaps") and G.nodes[nid].get("kind") == "computers":
+        tags.append("LAPS")
+    return tags
 
 
 def _edge_commands(
@@ -51,6 +76,24 @@ def _stats_md_lines(stats: dict) -> list[str]:
 
 # ── Console ───────────────────────────────────────────────────────────────────
 
+_DCSYNC_GRANTING_EDGES = {
+    "DCSync", "GetChangesAll", "GetChanges", "GetChangesInFilteredSet",
+    "WriteDacl", "WriteOwner", "Owns", "GenericAll", "AllExtendedRights",
+}
+
+
+def _path_yields_dcsync(G: "nx.DiGraph", path: "PathResult") -> bool:
+    """True if the last non-structural edge ends on a domain with a DCSync-granting rel."""
+    for edge in reversed(path.edges):
+        rel = edge["relation"]
+        if rel in ("MemberOf", "Contains"):
+            continue
+        if rel in _DCSYNC_GRANTING_EDGES and G.nodes.get(edge["dst"], {}).get("kind") == "domains":
+            return True
+        return False
+    return False
+
+
 def print_paths_console(
     paths: list["PathResult"],
     G: "nx.DiGraph",
@@ -70,13 +113,17 @@ def print_paths_console(
         print(f"\n[PATH {i}] Total weight: {path.total_weight} | Hops: {path.hops}")
         print("─" * 50)
         actor = _display_name(G, path.nodes[0])
-        print(actor)
+        flags = _node_flags(G, path.nodes[0])
+        flag_str = f"  ⚑ {', '.join(flags)}" if flags else ""
+        print(f"{actor}{flag_str}")
         for edge in path.edges:
             rel = edge["relation"]
             dst_name = _display_name(G, edge["dst"])
+            dst_flags = _node_flags(G, edge["dst"])
+            flag_str = f"  ⚑ {', '.join(dst_flags)}" if dst_flags else ""
             arrow = f"  └─[{rel}]"
             pad = max(1, 42 - len(arrow))
-            print(f"{arrow}{'─' * pad}► {dst_name}")
+            print(f"{arrow}{'─' * pad}► {dst_name}{flag_str}")
 
             cmd, next_actor = _edge_commands(G, edge, actor)
             print(f"     ↳ {cmd.description}")
@@ -85,6 +132,80 @@ def print_paths_console(
             if next_actor != actor:
                 print(f"     → now operating as: {next_actor}")
             actor = next_actor
+
+        if _path_yields_dcsync(G, path):
+            print("\n  ✦ This path grants DCSync — domain compromise. Use the secretsdump")
+            print("    command above to harvest all hashes (krbtgt → Golden Ticket forever).")
+
+
+def print_intermediate_targets(
+    G: "nx.DiGraph",
+    source: str,
+    suggestions: list[dict],
+) -> None:
+    """Console output for fallback intermediate-target suggestions."""
+    if not suggestions:
+        return
+    src_name = _display_name(G, source)
+    print(f"\n[+] No DA path — best intermediate targets reachable from {src_name}:")
+    for i, s in enumerate(suggestions, 1):
+        nid = s["node"]
+        path = s["path"]
+        score = s["score"]
+        d_name = _display_name(G, nid)
+        kind = G.nodes[nid].get("kind", "?")
+        flags = _node_flags(G, nid)
+        flag_str = f"  ⚑ {', '.join(flags)}" if flags else ""
+        hops = path.hops if path else "?"
+        print(f"  {i:>2}. [score={score:>3}] {d_name} ({kind}) — {hops} hop(s){flag_str}")
+        if path:
+            chain = " → ".join(_display_name(G, n) for n in path.nodes)
+            print(f"        path: {chain}")
+
+
+def print_pivot_candidates(
+    G: "nx.DiGraph",
+    pivots: list[dict],
+    limit: int = 10,
+) -> None:
+    """Console output: principals with a path to DA that you can compromise out-of-band."""
+    if not pivots:
+        return
+    print(f"\n[+] Pivot candidates — compromise any of these and you inherit a path to DA:")
+    for i, pv in enumerate(pivots[:limit], 1):
+        nid = pv["node"]
+        ptd = pv["path_to_da"]
+        name = _display_name(G, nid)
+        kind = G.nodes[nid].get("kind", "?")
+        flags = _node_flags(G, nid)
+        flag_str = f"  ⚑ {', '.join(flags)}" if flags else ""
+        hops = ptd.hops if ptd else "?"
+        print(f"\n  {i:>2}. [score={pv['score']:>3}] {name} ({kind}) — {hops} hops to DA{flag_str}")
+        print(f"        Attack vectors: {', '.join(pv['vectors'])}")
+        for c in pv["vector_commands"][:3]:
+            print(f"          $ {c}")
+        if ptd:
+            chain = " → ".join(_display_name(G, n) for n in ptd.nodes)
+            print(f"        Onward path: {chain}")
+
+
+def print_quickwins(
+    G: "nx.DiGraph",
+    quickwins: dict[str, list["QuickWin"]],
+    limit_per_cat: int = 5,
+) -> None:
+    if not quickwins:
+        return
+    print(f"\n[+] Domain-wide quick wins (independent of any owned user):")
+    for cat in sorted(quickwins):
+        items = quickwins[cat]
+        print(f"\n  ◆ {cat}: {len(items)} candidate(s)")
+        for qw in items[:limit_per_cat]:
+            print(f"     • {qw.node_name} ({qw.node_kind}) — {qw.detail}")
+            for c in qw.commands[:2]:
+                print(f"        $ {c}")
+        if len(items) > limit_per_cat:
+            print(f"     … and {len(items) - limit_per_cat} more")
 
 
 # ── Markdown ──────────────────────────────────────────────────────────────────
@@ -95,6 +216,9 @@ def render_markdown(
     source: str,
     target: str,
     stats: dict | None = None,
+    intermediate: list[dict] | None = None,
+    quickwins: dict[str, list["QuickWin"]] | None = None,
+    pivots: list[dict] | None = None,
 ) -> str:
     lines: list[str] = []
     lines.append("# Pathdog — Attack Path Report\n")
@@ -110,6 +234,12 @@ def render_markdown(
             f"`{_display_name(G, target)}`.  \n"
             "> The owned user may not have any edges leading to DA in this dump."
         )
+        if intermediate:
+            lines.extend(_intermediate_md(G, source, intermediate))
+        if pivots:
+            lines.extend(_pivots_md(G, pivots))
+        if quickwins:
+            lines.extend(_quickwins_md(quickwins))
         lines.append("\n---")
         lines.append("*Generated by [pathdog](https://github.com/dikabraxis/pathdog)*")
         return "\n".join(lines)
@@ -119,17 +249,28 @@ def render_markdown(
     for i, path in enumerate(paths, 1):
         lines.append(f"### Path {i} — Weight: {path.total_weight} | Hops: {path.hops}\n")
 
-        # ASCII chain
+        # ASCII chain (with property flags)
         lines.append("```")
-        actor = _display_name(G, path.nodes[0])
-        lines.append(actor)
+        first_flags = _node_flags(G, path.nodes[0])
+        first_str = _display_name(G, path.nodes[0])
+        if first_flags:
+            first_str += f"  ⚑ {', '.join(first_flags)}"
+        lines.append(first_str)
         for edge in path.edges:
             rel = edge["relation"]
             dst_name = _display_name(G, edge["dst"])
+            dst_flags = _node_flags(G, edge["dst"])
+            tail = f"  ⚑ {', '.join(dst_flags)}" if dst_flags else ""
             arrow = f"  └─[{rel}]"
             pad = max(1, 42 - len(arrow))
-            lines.append(f"{arrow}{'─' * pad}► {dst_name}")
+            lines.append(f"{arrow}{'─' * pad}► {dst_name}{tail}")
         lines.append("```\n")
+
+        if _path_yields_dcsync(G, path):
+            lines.append(
+                "> ✦ **DCSync acquired** — once `dacledit` lands, "
+                "`secretsdump` returns every domain hash (incl. krbtgt → Golden Ticket).\n"
+            )
 
         # Edge table
         lines.append("| # | From | Relation | To | Weight |")
@@ -162,9 +303,137 @@ def render_markdown(
                 lines.append(f"> ✦ **Identity obtained: `{next_actor}`**\n")
             actor = next_actor
 
+    if pivots:
+        lines.extend(_pivots_md(G, pivots))
+
+    if quickwins:
+        lines.extend(_quickwins_md(quickwins))
+
     lines.append("---")
     lines.append("*Generated by [pathdog](https://github.com/dikabraxis/pathdog)*")
     return "\n".join(lines)
+
+
+def _intermediate_md(
+    G: "nx.DiGraph", source: str, suggestions: list[dict]
+) -> list[str]:
+    lines: list[str] = ["\n## Intermediate targets reachable\n",
+                        "When DA isn't directly reachable, pivot through these:\n",
+                        "| # | Score | Target | Kind | Hops | Flags |",
+                        "|---|-------|--------|------|------|-------|"]
+    for i, s in enumerate(suggestions, 1):
+        nid = s["node"]
+        path = s["path"]
+        score = s["score"]
+        flags = ", ".join(_node_flags(G, nid)) or "—"
+        hops = path.hops if path else "?"
+        lines.append(
+            f"| {i} | {score} | `{_display_name(G, nid)}` "
+            f"| {G.nodes[nid].get('kind', '?')} | {hops} | {flags} |"
+        )
+    lines.append("")
+    for i, s in enumerate(suggestions, 1):
+        path = s["path"]
+        if not path:
+            continue
+        chain = " → ".join(f"`{_display_name(G, n)}`" for n in path.nodes)
+        lines.append(f"**{i}.** {chain}\n")
+    return lines
+
+
+def _quickwins_md(quickwins: dict[str, list["QuickWin"]]) -> list[str]:
+    lines: list[str] = ["\n## Domain-wide quick wins\n",
+                        "Surfaced from BloodHound node properties — independent of any owned user.\n"]
+    for cat in sorted(quickwins):
+        items = quickwins[cat]
+        lines.append(f"### {cat} — {len(items)} candidate(s)\n")
+        for qw in items:
+            lines.append(f"- **`{qw.node_name}`** ({qw.node_kind}) — {qw.detail}")
+            if qw.commands:
+                lines.append("  ```bash")
+                for c in qw.commands:
+                    lines.append(f"  {c}")
+                lines.append("  ```")
+        lines.append("")
+    return lines
+
+
+def _pivots_md(G: "nx.DiGraph", pivots: list[dict]) -> list[str]:
+    if not pivots:
+        return []
+    lines = [
+        "\n## Pivot candidates (have a path to DA, attackable out-of-band)\n",
+        "Compromise any of these via the listed vector and the existing graph path takes you to DA.\n",
+        "| # | Score | Pivot | Hops to DA | Vectors | Flags |",
+        "|---|-------|-------|------------|---------|-------|",
+    ]
+    for i, pv in enumerate(pivots, 1):
+        nid = pv["node"]
+        ptd = pv["path_to_da"]
+        flags = ", ".join(_node_flags(G, nid)) or "—"
+        hops = ptd.hops if ptd else "?"
+        vectors = ", ".join(pv["vectors"])
+        lines.append(
+            f"| {i} | {pv['score']} | `{_display_name(G, nid)}` | {hops} | {vectors} | {flags} |"
+        )
+    lines.append("")
+    for i, pv in enumerate(pivots, 1):
+        nid = pv["node"]
+        ptd = pv["path_to_da"]
+        lines.append(f"### {i}. `{_display_name(G, nid)}`\n")
+        if pv["vector_commands"]:
+            lines.append("```bash")
+            lines.extend(pv["vector_commands"])
+            lines.append("```\n")
+        if ptd:
+            chain = " → ".join(f"`{_display_name(G, n)}`" for n in ptd.nodes)
+            lines.append(f"**Onward path to DA:** {chain}\n")
+    return lines
+
+
+def _pivots_html(G: "nx.DiGraph", pivots: list[dict]) -> str:
+    if not pivots:
+        return ""
+    parts = [
+        '<h2>Pivot Candidates</h2>',
+        '<p class="meta">Principals with an existing graph path to DA. '
+        'Compromise any of them out-of-band (Kerberoast, AS-REP, weak password, LAPS) '
+        'and the chain to DA becomes exploitable.</p>',
+    ]
+    for i, pv in enumerate(pivots, 1):
+        nid = pv["node"]
+        ptd = pv["path_to_da"]
+        name = _escape(_display_name(G, nid))
+        kind = _escape(G.nodes[nid].get("kind", "?"))
+        flags = ", ".join(_node_flags(G, nid)) or "—"
+        hops = ptd.hops if ptd else "?"
+        vectors = _escape(", ".join(pv["vectors"]))
+        chain = (
+            " &#8594; ".join(_escape(_display_name(G, n)) for n in ptd.nodes)
+            if ptd else "—"
+        )
+        parts.append('<div class="path-card">')
+        parts.append(
+            f'<div class="path-header">'
+            f'<span class="path-badge">PIVOT {i}</span>'
+            f'<span class="path-meta">'
+            f'<strong>{name}</strong> ({kind}) — score {pv["score"]} '
+            f'&nbsp;|&nbsp; {hops} hops to DA</span></div>'
+        )
+        parts.append('<div class="chain">')
+        parts.append(f'<div class="exploit-desc"><b>Vectors:</b> {vectors}</div>')
+        parts.append(f'<div class="exploit-desc"><b>Flags:</b> {_escape(flags)}</div>')
+        if pv["vector_commands"]:
+            lines = []
+            for c in pv["vector_commands"]:
+                if c.startswith("#"):
+                    lines.append(f'<span class="comment">{_escape(c)}</span>')
+                else:
+                    lines.append(_escape(c))
+            parts.append(f'<div class="exploit-commands">{"<br>".join(lines)}</div>')
+        parts.append(f'<div class="exploit-desc" style="margin-top:.5rem"><b>Onward to DA:</b> {chain}</div>')
+        parts.append('</div></div>')
+    return "\n".join(parts)
 
 
 # ── HTML ──────────────────────────────────────────────────────────────────────
@@ -372,16 +641,30 @@ def render_html(
     source: str,
     target: str,
     stats: dict | None = None,
+    intermediate: list[dict] | None = None,
+    quickwins: dict[str, list["QuickWin"]] | None = None,
+    pivots: list[dict] | None = None,
 ) -> str:
     source_name = _escape(_display_name(G, source))
     target_name = _escape(_display_name(G, target))
     stats_block = _STATS_HTML.format(**stats) if stats else ""
 
     if not paths:
-        paths_block = _NO_PATH_HTML.format(source=source_name, target=target_name)
+        body = _NO_PATH_HTML.format(source=source_name, target=target_name)
+        if intermediate:
+            body += _intermediate_html(G, source, intermediate)
+        if pivots:
+            body += _pivots_html(G, pivots)
+        if quickwins:
+            body += _quickwins_html(quickwins)
+        paths_block = body
         path_count = "0"
     else:
         paths_block = "\n".join(_render_path_html(p, G, i) for i, p in enumerate(paths, 1))
+        if pivots:
+            paths_block += _pivots_html(G, pivots)
+        if quickwins:
+            paths_block += _quickwins_html(quickwins)
         path_count = str(len(paths))
 
     return (
@@ -394,6 +677,66 @@ def render_html(
     )
 
 
+def _intermediate_html(
+    G: "nx.DiGraph", source: str, suggestions: list[dict]
+) -> str:
+    if not suggestions:
+        return ""
+    rows = []
+    for i, s in enumerate(suggestions, 1):
+        nid = s["node"]
+        path = s["path"]
+        flags = ", ".join(_node_flags(G, nid)) or "—"
+        hops = path.hops if path else "?"
+        chain = (
+            " &#8594; ".join(_escape(_display_name(G, n)) for n in path.nodes)
+            if path else "(no path)"
+        )
+        rows.append(
+            f'<tr><td>{i}</td><td>{s["score"]}</td>'
+            f'<td><code>{_escape(_display_name(G, nid))}</code></td>'
+            f'<td>{_escape(G.nodes[nid].get("kind", "?"))}</td>'
+            f'<td>{hops}</td><td>{_escape(flags)}</td><td>{chain}</td></tr>'
+        )
+    return (
+        '<h2>Intermediate Targets Reachable</h2>'
+        '<p class="meta">When DA is not directly reachable, pivot through these.</p>'
+        '<table class="stats-table">'
+        '<tr><th>#</th><th>Score</th><th>Target</th><th>Kind</th><th>Hops</th>'
+        '<th>Flags</th><th>Path</th></tr>'
+        + "".join(rows)
+        + "</table>"
+    )
+
+
+def _quickwins_html(quickwins: dict[str, list["QuickWin"]]) -> str:
+    if not quickwins:
+        return ""
+    parts = ['<h2>Domain-Wide Quick Wins</h2>',
+             '<p class="meta">Surfaced from node properties — independent of any owned user.</p>']
+    for cat in sorted(quickwins):
+        items = quickwins[cat]
+        parts.append(f'<h3 style="color:var(--warn);margin-top:1rem">{_escape(cat)} '
+                     f'<span class="weight-badge">({len(items)})</span></h3>')
+        for qw in items:
+            parts.append('<div class="exploit-block">')
+            parts.append(
+                f'<div class="actor-badge">{_escape(qw.node_name)} '
+                f'({_escape(qw.node_kind)})</div>'
+            )
+            parts.append(f'<div class="exploit-desc">{_escape(qw.detail)}</div>')
+            if qw.commands:
+                lines = []
+                for c in qw.commands:
+                    if c.startswith("#"):
+                        lines.append(f'<span class="comment">{_escape(c)}</span>')
+                    else:
+                        lines.append(_escape(c))
+                parts.append(f'<div class="exploit-commands">{"<br>".join(lines)}</div>')
+            parts.append("</div>")
+    return "\n".join(parts)
+
+
 # ── Multi-user renderers ──────────────────────────────────────────────────────
 
 def render_markdown_multi(
@@ -401,10 +744,19 @@ def render_markdown_multi(
     G: "nx.DiGraph",
     target: str,
     stats: dict | None = None,
+    intermediates: dict[str, list[dict]] | None = None,
+    quickwins: dict[str, list["QuickWin"]] | None = None,
+    pivots: list[dict] | None = None,
 ) -> str:
+    intermediates = intermediates or {}
     if len(results) == 1:
         source, paths = results[0]
-        return render_markdown(paths, G, source, target, stats)
+        return render_markdown(
+            paths, G, source, target, stats,
+            intermediate=intermediates.get(source),
+            quickwins=quickwins,
+            pivots=pivots,
+        )
 
     lines: list[str] = []
     lines.append("# Pathdog — Multi-User Attack Path Report\n")
@@ -415,9 +767,21 @@ def render_markdown_multi(
     for source, paths in results:
         src_label = _display_name(G, source)
         lines.append(f"\n---\n\n## Owned: `{src_label}`\n")
-        single = render_markdown(paths, G, source, target, stats=None)
-        # Skip the title+meta lines already rendered above
+        single = render_markdown(
+            paths, G, source, target, stats=None,
+            intermediate=intermediates.get(source),
+            quickwins=None,
+            pivots=None,  # rendered once globally below
+        )
         lines.append("\n".join(single.split("\n")[3:]))
+
+    if pivots:
+        lines.append("\n---\n")
+        lines.extend(_pivots_md(G, pivots))
+
+    if quickwins:
+        lines.append("\n---\n")
+        lines.extend(_quickwins_md(quickwins))
 
     return "\n".join(lines)
 
@@ -427,10 +791,19 @@ def render_html_multi(
     G: "nx.DiGraph",
     target: str,
     stats: dict | None = None,
+    intermediates: dict[str, list[dict]] | None = None,
+    quickwins: dict[str, list["QuickWin"]] | None = None,
+    pivots: list[dict] | None = None,
 ) -> str:
+    intermediates = intermediates or {}
     if len(results) == 1:
         source, paths = results[0]
-        return render_html(paths, G, source, target, stats)
+        return render_html(
+            paths, G, source, target, stats,
+            intermediate=intermediates.get(source),
+            quickwins=quickwins,
+            pivots=pivots,
+        )
 
     target_name = _escape(_display_name(G, target))
     stats_block = _STATS_HTML.format(**stats) if stats else ""
@@ -444,12 +817,21 @@ def render_html_multi(
         ]
         if not paths:
             parts.append(_NO_PATH_HTML.format(source=src_label, target=target_name))
+            inter = intermediates.get(source)
+            if inter:
+                parts.append(_intermediate_html(G, source, inter))
         else:
             parts.append(f'<h2>Paths Found: {len(paths)}</h2>')
             for i, p in enumerate(paths, 1):
                 parts.append(_render_path_html(p, G, i))
         parts.append("</div>")
         sections.append("\n".join(parts))
+
+    if pivots:
+        sections.append(_pivots_html(G, pivots))
+
+    if quickwins:
+        sections.append(_quickwins_html(quickwins))
 
     return (
         _HTML_MULTI_TEMPLATE
