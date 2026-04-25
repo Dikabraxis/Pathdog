@@ -1,6 +1,7 @@
 """NetworkX DiGraph builder with ancestor-based pruning."""
 
 import networkx as nx
+from collections import defaultdict
 from .weights import EDGE_WEIGHTS, DEFAULT_WEIGHT
 
 
@@ -13,12 +14,17 @@ def build_graph(nodes: list[dict], edges: list[dict]) -> nx.DiGraph:
         name = node["props"].get("name") or node["props"].get("Name") or nid
         G.add_node(nid, kind=node["kind"], name=name, props=node["props"])
 
+    # Track all relations between each (src,dst) so we can detect
+    # implicit DCSync = GetChanges + GetChangesAll on the same target.
+    multi_rels: dict[tuple[str, str], set[str]] = defaultdict(set)
+
     for edge in edges:
         src, dst, rtype = edge["src"], edge["dst"], edge["type"]
         if src not in G:
             G.add_node(src, kind="unknown", name=src, props={})
         if dst not in G:
             G.add_node(dst, kind="unknown", name=dst, props={})
+        multi_rels[(src, dst)].add(rtype)
         w = EDGE_WEIGHTS.get(rtype, DEFAULT_WEIGHT)
         if G.has_edge(src, dst):
             if G[src][dst]["weight"] > w:
@@ -26,6 +32,31 @@ def build_graph(nodes: list[dict], edges: list[dict]) -> nx.DiGraph:
                 G[src][dst]["relation"] = rtype
         else:
             G.add_edge(src, dst, relation=rtype, weight=w)
+
+    # Synthesize DCSync edges: principal having both GetChanges and
+    # GetChangesAll on a domain (or the equivalent extended right pair).
+    # If only one of the pair is present, the edge alone is NOT exploitable —
+    # bump its weight to deprioritize it during pathfinding.
+    dcsync_w = EDGE_WEIGHTS.get("DCSync", 2)
+    inert_changes_w = 8  # GetChanges/GetChangesAll alone — not actionable on its own
+    for (src, dst), rels in multi_rels.items():
+        if "DCSync" in rels:
+            continue
+        has_changes = bool(rels & {"GetChanges", "GetChangesInFilteredSet"})
+        has_changes_all = "GetChangesAll" in rels
+        if has_changes and has_changes_all and G.nodes[dst].get("kind") == "domains":
+            if G.has_edge(src, dst):
+                if G[src][dst]["weight"] >= dcsync_w:
+                    G[src][dst]["weight"] = dcsync_w
+                    G[src][dst]["relation"] = "DCSync"
+            else:
+                G.add_edge(src, dst, relation="DCSync", weight=dcsync_w)
+        elif (has_changes ^ has_changes_all) and G.nodes[dst].get("kind") == "domains":
+            # Only one half — keep the relation but make it expensive.
+            if G.has_edge(src, dst):
+                cur_rel = G[src][dst]["relation"]
+                if cur_rel in ("GetChanges", "GetChangesAll", "GetChangesInFilteredSet"):
+                    G[src][dst]["weight"] = inert_changes_w
 
     return G
 
