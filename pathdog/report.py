@@ -391,353 +391,8 @@ def _pivots_md(G: "nx.DiGraph", pivots: list[dict]) -> list[str]:
     return lines
 
 
-def _pivots_html(G: "nx.DiGraph", pivots: list[dict]) -> str:
-    if not pivots:
-        return ""
-    parts = [
-        '<h2>Pivot Candidates</h2>',
-        '<p class="meta">Principals with an existing graph path to DA. '
-        'Compromise any of them out-of-band (Kerberoast, AS-REP, weak password, LAPS) '
-        'and the chain to DA becomes exploitable.</p>',
-    ]
-    for i, pv in enumerate(pivots, 1):
-        nid = pv["node"]
-        ptd = pv["path_to_da"]
-        name = _escape(_display_name(G, nid))
-        kind = _escape(G.nodes[nid].get("kind", "?"))
-        flags = ", ".join(_node_flags(G, nid)) or "—"
-        hops = ptd.hops if ptd else "?"
-        vectors = _escape(", ".join(pv["vectors"]))
-        chain = (
-            " &#8594; ".join(_escape(_display_name(G, n)) for n in ptd.nodes)
-            if ptd else "—"
-        )
-        parts.append('<div class="path-card">')
-        parts.append(
-            f'<div class="path-header">'
-            f'<span class="path-badge">PIVOT {i}</span>'
-            f'<span class="path-meta">'
-            f'<strong>{name}</strong> ({kind}) — score {pv["score"]} '
-            f'&nbsp;|&nbsp; {hops} hops to DA</span></div>'
-        )
-        parts.append('<div class="chain">')
-        parts.append(f'<div class="exploit-desc"><b>Vectors:</b> {vectors}</div>')
-        parts.append(f'<div class="exploit-desc"><b>Flags:</b> {_escape(flags)}</div>')
-        if pv["vector_commands"]:
-            lines = []
-            for c in pv["vector_commands"]:
-                if c.startswith("#"):
-                    lines.append(f'<span class="comment">{_escape(c)}</span>')
-                else:
-                    lines.append(_escape(c))
-            parts.append(f'<div class="exploit-commands">{"<br>".join(lines)}</div>')
-        parts.append(f'<div class="exploit-desc" style="margin-top:.5rem"><b>Onward to DA:</b> {chain}</div>')
-        parts.append('</div></div>')
-    return "\n".join(parts)
 
-
-# ── HTML ──────────────────────────────────────────────────────────────────────
-
-_HTML_TEMPLATE = """\
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Pathdog — Attack Path Report</title>
-<style>
-  :root {
-    --bg: #0d1117; --surface: #161b22; --border: #30363d;
-    --accent: #58a6ff; --accent2: #3fb950; --warn: #d29922;
-    --danger: #f85149; --text: #c9d1d9; --muted: #8b949e;
-    --code-bg: #1f2428; --new-actor: #bc8cff;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; font-size: 14px; line-height: 1.6; padding: 2rem; }
-  h1 { color: var(--accent); font-size: 1.6rem; margin-bottom: 0.5rem; }
-  h2 { color: var(--accent); font-size: 1.2rem; margin: 1.5rem 0 0.75rem; border-bottom: 1px solid var(--border); padding-bottom: 0.4rem; }
-  .meta { color: var(--muted); margin-bottom: 1.5rem; }
-  .meta span { color: var(--accent); font-family: monospace; }
-  .stats-table { border-collapse: collapse; margin-bottom: 1.5rem; }
-  .stats-table th, .stats-table td { border: 1px solid var(--border); padding: 0.4rem 0.8rem; }
-  .stats-table th { background: var(--surface); color: var(--accent); }
-  .stats-table td { font-family: monospace; }
-  .no-path { background: var(--surface); border: 1px solid var(--danger); border-radius: 6px; padding: 1rem 1.25rem; color: var(--danger); margin-top: 1rem; }
-  .path-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 1.5rem; overflow: hidden; }
-  .path-header { background: #1c2128; padding: 0.6rem 1rem; display: flex; align-items: center; gap: 1rem; border-bottom: 1px solid var(--border); }
-  .path-badge { background: var(--accent); color: #0d1117; font-weight: 700; font-size: 0.8rem; padding: 0.2rem 0.6rem; border-radius: 20px; }
-  .path-meta { color: var(--muted); font-size: 0.85rem; }
-  .path-meta strong { color: var(--text); }
-  .chain { padding: 1.25rem 1.5rem; }
-  .chain-node { display: flex; align-items: center; gap: 0.5rem; margin: 0.1rem 0; }
-  .node-pill { background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px; padding: 0.25rem 0.6rem; font-family: monospace; font-size: 0.85rem; color: var(--text); white-space: nowrap; }
-  .node-pill.source { border-color: var(--accent2); color: var(--accent2); }
-  .node-pill.target { border-color: var(--danger); color: var(--danger); }
-  .actor-badge { font-size: 0.72rem; color: var(--muted); margin-left: 0.4rem; font-style: italic; }
-  .chain-edge { padding: 0.15rem 0 0.15rem 1rem; }
-  .edge-connector { display: flex; align-items: center; gap: 0.5rem; font-size: 0.8rem; color: var(--muted); }
-  .edge-line { width: 2px; height: 14px; background: var(--border); flex-shrink: 0; }
-  .rel-badge { background: #21262d; border: 1px solid var(--border); border-radius: 20px; padding: 0.1rem 0.55rem; font-family: monospace; font-size: 0.78rem; color: var(--warn); }
-  .weight-badge { font-size: 0.72rem; color: var(--muted); }
-  .exploit-block { margin: 0.4rem 0 0.4rem 1.6rem; border-left: 2px solid var(--border); padding-left: 0.75rem; }
-  .exploit-desc { font-size: 0.82rem; color: var(--muted); margin-bottom: 0.3rem; font-style: italic; }
-  .exploit-commands { background: var(--code-bg); border: 1px solid var(--border); border-radius: 4px; padding: 0.6rem 0.9rem; font-family: monospace; font-size: 0.8rem; white-space: pre; overflow-x: auto; color: var(--accent2); line-height: 1.7; }
-  .exploit-commands .comment { color: var(--muted); }
-  .actor-change { font-size: 0.78rem; color: var(--new-actor); margin-top: 0.3rem; padding: 0.2rem 0.5rem; background: #1a1040; border-radius: 4px; display: inline-block; }
-  .user-section { margin-bottom: 2.5rem; }
-  .user-banner { background: #1c2128; border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 1rem; margin-bottom: 1rem; font-family: monospace; color: var(--accent2); font-size: 0.95rem; }
-  footer { margin-top: 2rem; color: var(--muted); font-size: 0.8rem; border-top: 1px solid var(--border); padding-top: 1rem; }
-  footer a { color: var(--accent); text-decoration: none; }
-</style>
-</head>
-<body>
-<h1>&#128021; Pathdog — Attack Path Report</h1>
-<div class="meta">Source: <span>{{SOURCE_NAME}}</span> &nbsp;&#8594;&nbsp; Target: <span>{{TARGET_NAME}}</span></div>
-{{STATS_BLOCK}}
-<h2>Paths Found: {{PATH_COUNT}}</h2>
-{{PATHS_BLOCK}}
-<footer>Generated by <a href="https://github.com/dikabraxis/pathdog">pathdog</a></footer>
-</body>
-</html>
-"""
-
-_HTML_MULTI_TEMPLATE = """\
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Pathdog — Multi-User Attack Path Report</title>
-<style>
-  :root { --bg:#0d1117;--surface:#161b22;--border:#30363d;--accent:#58a6ff;--accent2:#3fb950;--warn:#d29922;--danger:#f85149;--text:#c9d1d9;--muted:#8b949e;--code-bg:#1f2428;--new-actor:#bc8cff; }
-  *{box-sizing:border-box;margin:0;padding:0;}
-  body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,monospace;font-size:14px;line-height:1.6;padding:2rem;}
-  h1{color:var(--accent);font-size:1.6rem;margin-bottom:.5rem;}
-  h2{color:var(--accent);font-size:1.2rem;margin:1.5rem 0 .75rem;border-bottom:1px solid var(--border);padding-bottom:.4rem;}
-  .meta{color:var(--muted);margin-bottom:1.5rem;} .meta span{color:var(--accent);font-family:monospace;}
-  .stats-table{border-collapse:collapse;margin-bottom:1.5rem;} .stats-table th,.stats-table td{border:1px solid var(--border);padding:.4rem .8rem;} .stats-table th{background:var(--surface);color:var(--accent);} .stats-table td{font-family:monospace;}
-  .no-path{background:var(--surface);border:1px solid var(--danger);border-radius:6px;padding:1rem 1.25rem;color:var(--danger);margin-top:1rem;}
-  .path-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:1.5rem;overflow:hidden;}
-  .path-header{background:#1c2128;padding:.6rem 1rem;display:flex;align-items:center;gap:1rem;border-bottom:1px solid var(--border);}
-  .path-badge{background:var(--accent);color:#0d1117;font-weight:700;font-size:.8rem;padding:.2rem .6rem;border-radius:20px;}
-  .path-meta{color:var(--muted);font-size:.85rem;} .path-meta strong{color:var(--text);}
-  .chain{padding:1.25rem 1.5rem;}
-  .chain-node{display:flex;align-items:center;gap:.5rem;margin:.1rem 0;}
-  .node-pill{background:var(--code-bg);border:1px solid var(--border);border-radius:4px;padding:.25rem .6rem;font-family:monospace;font-size:.85rem;color:var(--text);white-space:nowrap;}
-  .node-pill.source{border-color:var(--accent2);color:var(--accent2);} .node-pill.target{border-color:var(--danger);color:var(--danger);}
-  .actor-badge{font-size:.72rem;color:var(--muted);margin-left:.4rem;font-style:italic;}
-  .chain-edge{padding:.15rem 0 .15rem 1rem;}
-  .edge-connector{display:flex;align-items:center;gap:.5rem;font-size:.8rem;color:var(--muted);}
-  .edge-line{width:2px;height:14px;background:var(--border);flex-shrink:0;}
-  .rel-badge{background:#21262d;border:1px solid var(--border);border-radius:20px;padding:.1rem .55rem;font-family:monospace;font-size:.78rem;color:var(--warn);}
-  .weight-badge{font-size:.72rem;color:var(--muted);}
-  .exploit-block{margin:.4rem 0 .4rem 1.6rem;border-left:2px solid var(--border);padding-left:.75rem;}
-  .exploit-desc{font-size:.82rem;color:var(--muted);margin-bottom:.3rem;font-style:italic;}
-  .exploit-commands{background:var(--code-bg);border:1px solid var(--border);border-radius:4px;padding:.6rem .9rem;font-family:monospace;font-size:.8rem;white-space:pre;overflow-x:auto;color:var(--accent2);line-height:1.7;}
-  .exploit-commands .comment{color:var(--muted);}
-  .actor-change{font-size:.78rem;color:var(--new-actor);margin-top:.3rem;padding:.2rem .5rem;background:#1a1040;border-radius:4px;display:inline-block;}
-  .user-section{margin-bottom:2.5rem;}
-  .user-banner{background:#1c2128;border:1px solid var(--border);border-radius:6px;padding:.6rem 1rem;margin-bottom:1rem;font-family:monospace;color:var(--accent2);font-size:.95rem;}
-  footer{margin-top:2rem;color:var(--muted);font-size:.8rem;border-top:1px solid var(--border);padding-top:1rem;}
-  footer a{color:var(--accent);text-decoration:none;}
-</style>
-</head>
-<body>
-<h1>&#128021; Pathdog — Multi-User Attack Path Report</h1>
-<div class="meta">Target: <span>{{TARGET_NAME}}</span></div>
-{{STATS_BLOCK}}
-{{SECTIONS}}
-<footer>Generated by <a href="https://github.com/dikabraxis/pathdog">pathdog</a></footer>
-</body>
-</html>
-"""
-
-_STATS_HTML = """\
-<h2>Graph Statistics</h2>
-<table class="stats-table">
-<tr><th>Metric</th><th>Value</th></tr>
-<tr><td>Total nodes</td><td>{total_nodes}</td></tr>
-<tr><td>Total edges</td><td>{total_edges}</td></tr>
-<tr><td>Pruned nodes (reachable)</td><td>{pruned_nodes}</td></tr>
-<tr><td>Pruned edges</td><td>{pruned_edges}</td></tr>
-<tr><td>Node reduction</td><td>{reduction_pct}%</td></tr>
-</table>
-"""
-
-_NO_PATH_HTML = """\
-<div class="no-path">&#10060; No path found from <code>{source}</code> to <code>{target}</code>.<br>
-The owned user may not have any edges leading to DA in this dump.</div>
-"""
-
-
-def _escape(s: str) -> str:
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
-
-
-def _render_exploit_html(cmd: CommandSet, actor: str, next_actor: str) -> str:
-    parts = ['<div class="exploit-block">']
-    parts.append(f'<div class="actor-badge">acting as: {_escape(actor)}</div>')
-    parts.append(f'<div class="exploit-desc">{_escape(cmd.description)}</div>')
-    if cmd.has_commands:
-        lines = []
-        for c in cmd.commands:
-            if c.startswith("#"):
-                lines.append(f'<span class="comment">{_escape(c)}</span>')
-            else:
-                lines.append(_escape(c))
-        parts.append(f'<div class="exploit-commands">{"<br>".join(lines)}</div>')
-    if next_actor != actor:
-        parts.append(f'<div class="actor-change">&#10024; Identity obtained: {_escape(next_actor)}</div>')
-    parts.append("</div>")
-    return "\n".join(parts)
-
-
-def _render_path_html(path: "PathResult", G: "nx.DiGraph", index: int) -> str:
-    parts = ['<div class="path-card">']
-    parts.append(
-        f'<div class="path-header">'
-        f'<span class="path-badge">PATH {index}</span>'
-        f'<span class="path-meta">Weight: <strong>{path.total_weight}</strong>'
-        f' &nbsp;|&nbsp; Hops: <strong>{path.hops}</strong></span>'
-        f"</div>"
-    )
-    parts.append('<div class="chain">')
-
-    actor = _display_name(G, path.nodes[0])
-
-    for i, nid in enumerate(path.nodes):
-        name = _escape(_display_name(G, nid))
-        if i == 0:
-            cls = "node-pill source"
-        elif i == len(path.nodes) - 1:
-            cls = "node-pill target"
-        else:
-            cls = "node-pill"
-        parts.append(f'<div class="chain-node"><span class="{cls}">{name}</span></div>')
-
-        if i < len(path.edges):
-            edge = path.edges[i]
-            rel = _escape(edge["relation"])
-            w = edge["weight"]
-            parts.append(
-                f'<div class="chain-edge">'
-                f'<div class="edge-connector">'
-                f'<div class="edge-line"></div>'
-                f'<span class="rel-badge">{rel}</span>'
-                f'<span class="weight-badge">(w={w})</span>'
-                f"</div></div>"
-            )
-            cmd, next_actor = _edge_commands(G, edge, actor)
-            parts.append(_render_exploit_html(cmd, actor, next_actor))
-            actor = next_actor
-
-    parts.append("</div></div>")
-    return "\n".join(parts)
-
-
-def render_html(
-    paths: list["PathResult"],
-    G: "nx.DiGraph",
-    source: str,
-    target: str,
-    stats: dict | None = None,
-    intermediate: list[dict] | None = None,
-    quickwins: dict[str, list["QuickWin"]] | None = None,
-    pivots: list[dict] | None = None,
-) -> str:
-    source_name = _escape(_display_name(G, source))
-    target_name = _escape(_display_name(G, target))
-    stats_block = _STATS_HTML.format(**stats) if stats else ""
-
-    if not paths:
-        body = _NO_PATH_HTML.format(source=source_name, target=target_name)
-        if intermediate:
-            body += _intermediate_html(G, source, intermediate)
-        if pivots:
-            body += _pivots_html(G, pivots)
-        if quickwins:
-            body += _quickwins_html(quickwins)
-        paths_block = body
-        path_count = "0"
-    else:
-        paths_block = "\n".join(_render_path_html(p, G, i) for i, p in enumerate(paths, 1))
-        if pivots:
-            paths_block += _pivots_html(G, pivots)
-        if quickwins:
-            paths_block += _quickwins_html(quickwins)
-        path_count = str(len(paths))
-
-    return (
-        _HTML_TEMPLATE
-        .replace("{{SOURCE_NAME}}", source_name)
-        .replace("{{TARGET_NAME}}", target_name)
-        .replace("{{STATS_BLOCK}}", stats_block)
-        .replace("{{PATH_COUNT}}", path_count)
-        .replace("{{PATHS_BLOCK}}", paths_block)
-    )
-
-
-def _intermediate_html(
-    G: "nx.DiGraph", source: str, suggestions: list[dict]
-) -> str:
-    if not suggestions:
-        return ""
-    rows = []
-    for i, s in enumerate(suggestions, 1):
-        nid = s["node"]
-        path = s["path"]
-        flags = ", ".join(_node_flags(G, nid)) or "—"
-        hops = path.hops if path else "?"
-        chain = (
-            " &#8594; ".join(_escape(_display_name(G, n)) for n in path.nodes)
-            if path else "(no path)"
-        )
-        rows.append(
-            f'<tr><td>{i}</td><td>{s["score"]}</td>'
-            f'<td><code>{_escape(_display_name(G, nid))}</code></td>'
-            f'<td>{_escape(G.nodes[nid].get("kind", "?"))}</td>'
-            f'<td>{hops}</td><td>{_escape(flags)}</td><td>{chain}</td></tr>'
-        )
-    return (
-        '<h2>Intermediate Targets Reachable</h2>'
-        '<p class="meta">When DA is not directly reachable, pivot through these.</p>'
-        '<table class="stats-table">'
-        '<tr><th>#</th><th>Score</th><th>Target</th><th>Kind</th><th>Hops</th>'
-        '<th>Flags</th><th>Path</th></tr>'
-        + "".join(rows)
-        + "</table>"
-    )
-
-
-def _quickwins_html(quickwins: dict[str, list["QuickWin"]]) -> str:
-    if not quickwins:
-        return ""
-    parts = ['<h2>Domain-Wide Quick Wins</h2>',
-             '<p class="meta">Surfaced from node properties — independent of any owned user.</p>']
-    for cat in sorted(quickwins):
-        items = quickwins[cat]
-        parts.append(f'<h3 style="color:var(--warn);margin-top:1rem">{_escape(cat)} '
-                     f'<span class="weight-badge">({len(items)})</span></h3>')
-        for qw in items:
-            parts.append('<div class="exploit-block">')
-            parts.append(
-                f'<div class="actor-badge">{_escape(qw.node_name)} '
-                f'({_escape(qw.node_kind)})</div>'
-            )
-            parts.append(f'<div class="exploit-desc">{_escape(qw.detail)}</div>')
-            if qw.commands:
-                lines = []
-                for c in qw.commands:
-                    if c.startswith("#"):
-                        lines.append(f'<span class="comment">{_escape(c)}</span>')
-                    else:
-                        lines.append(_escape(c))
-                parts.append(f'<div class="exploit-commands">{"<br>".join(lines)}</div>')
-            parts.append("</div>")
-    return "\n".join(parts)
-
-
-# ── Multi-user renderers ──────────────────────────────────────────────────────
+# ── Multi-user Markdown ───────────────────────────────────────────────────────
 
 def render_markdown_multi(
     results: list[tuple[str, list]],
@@ -771,7 +426,7 @@ def render_markdown_multi(
             paths, G, source, target, stats=None,
             intermediate=intermediates.get(source),
             quickwins=None,
-            pivots=None,  # rendered once globally below
+            pivots=None,
         )
         lines.append("\n".join(single.split("\n")[3:]))
 
@@ -784,6 +439,725 @@ def render_markdown_multi(
         lines.extend(_quickwins_md(quickwins))
 
     return "\n".join(lines)
+
+
+# ── HTML ──────────────────────────────────────────────────────────────────────
+
+from .explanations import for_edge as _explain_edge
+from .explanations import for_vector as _explain_vector
+from .explanations import for_quickwin as _explain_quickwin
+
+
+def _escape(s: str) -> str:
+    return (s.replace("&", "&amp;").replace("<", "&lt;")
+             .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def _bullet_list(items: list[str]) -> str:
+    return "<ul>" + "".join(f"<li>{i}</li>" for i in items) + "</ul>"
+
+
+def _flag_pills_html(G: "nx.DiGraph", nid: str) -> str:
+    flags = _node_flags(G, nid)
+    if not flags:
+        return ""
+    palette = {
+        "AS-REP roastable":     "#dc2626",
+        "Kerberoastable":       "#dc2626",
+        "Unconstrained deleg.": "#dc2626",
+        "PasswordNotReqd":      "#dc2626",
+        "LAPS":                 "#0891b2",
+        "AdminCount=1":         "#a16207",
+        "HighValue":            "#7c3aed",
+    }
+    pills = []
+    for f in flags:
+        c = palette.get(f, "#475569")
+        pills.append(f'<span class="flag-pill" style="background:{c}1a;color:{c};border-color:{c}55">{_escape(f)}</span>')
+    return "".join(pills)
+
+
+def _kind_icon(kind: str) -> str:
+    return {
+        "users": "👤",
+        "computers": "💻",
+        "groups": "👥",
+        "domains": "🌐",
+        "gpos": "📜",
+        "ous": "📁",
+    }.get(kind, "•")
+
+
+def _verdict_html(
+    G: "nx.DiGraph",
+    source: str,
+    target: str,
+    paths: list,
+    pivots: list[dict] | None,
+) -> str:
+    """One-line verdict at the very top — green/orange/red dot + status."""
+    if paths:
+        best = paths[0]
+        kind = "win"
+        msg = f"Path found — {best.hops} hops, weight {best.total_weight}"
+    elif pivots:
+        top = pivots[0]
+        ptd = top["path_to_da"]
+        node_name = _escape(_display_name(G, top["node"]))
+        vector = top["vectors"][0] if top["vectors"] else "out-of-band"
+        hops = ptd.hops if ptd else "?"
+        kind = "warn"
+        msg = (f"No direct path — pivot via <b>{node_name}</b> "
+               f"({_escape(vector)}, {hops} hops onward)")
+    else:
+        kind = "fail"
+        msg = "No actionable path or pivot found"
+
+    return (
+        f'<div class="verdict verdict-{kind}">'
+        f'<span class="verdict-dot"></span>'
+        f'<span class="verdict-msg">{msg}</span>'
+        f'</div>'
+    )
+
+
+def _step_html(
+    G: "nx.DiGraph",
+    edge: dict,
+    actor: str,
+    step_num: int,
+) -> tuple[str, str]:
+    """Render one hop as a step card. Returns (html, next_actor)."""
+    rel = edge["relation"]
+    src_name = _display_name(G, edge["src"])
+    dst_name = _display_name(G, edge["dst"])
+    src_kind = G.nodes[edge["src"]].get("kind", "") if edge["src"] in G else ""
+    dst_kind = G.nodes[edge["dst"]].get("kind", "") if edge["dst"] in G else ""
+    explain = _explain_edge(rel)
+
+    if rel in ("MemberOf", "Contains"):
+        body = (
+            f'<div class="step step-structural">'
+            f'<div class="step-num">·</div>'
+            f'<div class="step-body">'
+            f'<div class="step-headline">{_kind_icon(src_kind)} '
+            f'<code>{_escape(src_name)}</code> '
+            f'<span class="step-arrow">→</span> '
+            f'{_kind_icon(dst_kind)} <code>{_escape(dst_name)}</code></div>'
+            f'<div class="step-meta">via <span class="rel-tag">{_escape(rel)}</span> '
+            f'— {_escape(explain["plain"])}</div>'
+            f'</div></div>'
+        )
+        return body, actor
+
+    cmd, next_actor = _edge_commands(G, edge, actor)
+    ident_change = ""
+    if next_actor != actor:
+        ident_change = (
+            f'<div class="ident-change">'
+            f'<span class="ident-arrow">↳</span> '
+            f'You now operate as <code>{_escape(next_actor)}</code>'
+            f'</div>'
+        )
+
+    cmd_block = ""
+    if cmd.has_commands:
+        lines = []
+        for c in cmd.commands:
+            if c.startswith("#"):
+                lines.append(f'<span class="cmt">{_escape(c)}</span>')
+            else:
+                lines.append(_escape(c))
+        cmd_block = (
+            f'<details class="cmd-details" open>'
+            f'<summary>Commands ({len(cmd.commands)})</summary>'
+            f'<pre class="cmd-pre">{"<br>".join(lines)}</pre>'
+            f'</details>'
+        )
+
+    body = (
+        f'<div class="step step-action">'
+        f'<div class="step-num">{step_num}</div>'
+        f'<div class="step-body">'
+        f'<div class="step-headline">'
+        f'{_kind_icon(src_kind)} <code>{_escape(src_name)}</code> '
+        f'<span class="rel-tag">{_escape(rel)}</span> '
+        f'{_kind_icon(dst_kind)} <code>{_escape(dst_name)}</code>'
+        f'{_flag_pills_html(G, edge["dst"])}'
+        f'</div>'
+        f'<div class="step-title">{_escape(explain["title"])}</div>'
+        f'<div class="step-explain">{_escape(explain["plain"])}</div>'
+        f'<div class="step-impact"><b>After this:</b> {_escape(explain["impact"])}</div>'
+        f'{cmd_block}'
+        f'{ident_change}'
+        f'</div></div>'
+    )
+    return body, next_actor
+
+
+def _path_card_html(
+    path: "PathResult",
+    G: "nx.DiGraph",
+    index: int,
+    is_best: bool = False,
+) -> str:
+    """Path card: ASCII chain + per-hop step (title, what it means, commands)."""
+    src_name = _display_name(G, path.nodes[0])
+    badge_text = "BEST" if is_best else f"PATH {index}"
+    badge_cls = "best" if is_best else ""
+
+    # ASCII chain at the top (overview)
+    chain_lines = [_escape(src_name)]
+    for edge in path.edges:
+        rel = _escape(edge["relation"])
+        dst = _escape(_display_name(G, edge["dst"]))
+        chain_lines.append(f"  └─[{rel}]──► {dst}")
+    chain_ascii = "\n".join(chain_lines)
+
+    # Per-hop steps (the riches)
+    steps_html: list[str] = []
+    actor = src_name
+    step_num = 0
+    for edge in path.edges:
+        if edge["relation"] in ("MemberOf", "Contains"):
+            html, _ = _step_html(G, edge, actor, step_num)  # structural — no number
+            steps_html.append(html)
+        else:
+            step_num += 1
+            html, actor = _step_html(G, edge, actor, step_num)
+            steps_html.append(html)
+
+    dcsync_pill = ""
+    if _path_yields_dcsync(G, path):
+        dcsync_pill = '<span class="badge-dcsync">DCSync</span>'
+
+    return (
+        f'<div class="path-card{(" best" if is_best else "")}" id="path-{index}">'
+        f'<div class="path-head">'
+        f'<span class="path-badge {badge_cls}">{badge_text}</span>'
+        f'<span class="path-stat">{path.hops} hops</span>'
+        f'<span class="path-stat">weight {path.total_weight}</span>'
+        f'{dcsync_pill}'
+        f'</div>'
+        f'<pre class="chain-ascii">{chain_ascii}</pre>'
+        f'<div class="path-steps">{"".join(steps_html)}</div>'
+        f'</div>'
+    )
+
+
+def _pivots_html(G: "nx.DiGraph", pivots: list[dict]) -> str:
+    if not pivots:
+        return ""
+    cards = []
+    for i, pv in enumerate(pivots, 1):
+        nid = pv["node"]
+        ptd = pv["path_to_da"]
+        name = _escape(_display_name(G, nid))
+        kind = G.nodes[nid].get("kind", "?")
+        hops = ptd.hops if ptd else "?"
+
+        # Vector blocks (each vector + its plain-English explanation)
+        vec_blocks = []
+        for v in pv["vectors"]:
+            vexp = _explain_vector(v)
+            vec_blocks.append(
+                f'<div class="vector-block">'
+                f'<div class="vector-name">{_escape(v)}</div>'
+                f'<div class="vector-explain">{_escape(vexp)}</div>'
+                f'</div>'
+            )
+        vectors_html = "".join(vec_blocks)
+
+        # Commands always visible (the whole point: copy-paste them)
+        cmd_block = ""
+        if pv["vector_commands"]:
+            lines = []
+            for c in pv["vector_commands"]:
+                if c.startswith("#"):
+                    lines.append(f'<span class="cmt">{_escape(c)}</span>')
+                else:
+                    lines.append(_escape(c))
+            cmd_block = f'<pre class="cmd-pre">{"<br>".join(lines)}</pre>'
+
+        # Onward path
+        chain = ""
+        if ptd:
+            lines = [_escape(_display_name(G, ptd.nodes[0]))]
+            for edge in ptd.edges:
+                rel = _escape(edge["relation"])
+                dst = _escape(_display_name(G, edge["dst"]))
+                lines.append(f"  └─[{rel}]──► {dst}")
+            chain = (
+                f'<div class="pivot-chain-label">Onward path to target:</div>'
+                f'<pre class="chain-ascii">{chr(10).join(lines)}</pre>'
+            )
+
+        cards.append(
+            f'<div class="pivot-card">'
+            f'<div class="pivot-head">'
+            f'<span class="pivot-rank">#{i}</span>'
+            f'<span class="pivot-name">{_kind_icon(kind)} {name}</span>'
+            f'<span class="pivot-stat">{hops} hops onward</span>'
+            f'<span class="pivot-stat">score {pv["score"]}</span>'
+            f'{_flag_pills_html(G, nid)}'
+            f'</div>'
+            f'<div class="pivot-body">'
+            f'{vectors_html}'
+            f'{cmd_block}'
+            f'{chain}'
+            f'</div>'
+            f'</div>'
+        )
+    return "".join(cards)
+
+
+def _intermediate_html(
+    G: "nx.DiGraph", source: str, suggestions: list[dict]
+) -> str:
+    if not suggestions:
+        return ""
+    cards = []
+    for i, s in enumerate(suggestions, 1):
+        nid = s["node"]
+        path = s["path"]
+        name = _escape(_display_name(G, nid))
+        kind = G.nodes[nid].get("kind", "?")
+        hops = path.hops if path else "?"
+        chain = ""
+        if path:
+            lines = [_escape(_display_name(G, path.nodes[0]))]
+            for edge in path.edges:
+                rel = _escape(edge["relation"])
+                dst = _escape(_display_name(G, edge["dst"]))
+                lines.append(f"  └─[{rel}]──► {dst}")
+            chain = f'<pre class="chain-ascii">{chr(10).join(lines)}</pre>'
+        cards.append(
+            f'<div class="pivot-card">'
+            f'<div class="pivot-head">'
+            f'<span class="pivot-rank">#{i}</span>'
+            f'<span class="pivot-name">{_kind_icon(kind)} {name}</span>'
+            f'<span class="pivot-stat">{hops} hops</span>'
+            f'<span class="pivot-stat">score {s["score"]}</span>'
+            f'{_flag_pills_html(G, nid)}'
+            f'</div>'
+            f'<div class="pivot-body">{chain}</div>'
+            f'</div>'
+        )
+    return "".join(cards)
+
+
+def _quickwins_html(quickwins: dict[str, list["QuickWin"]]) -> str:
+    if not quickwins:
+        return ""
+    blocks = []
+    for cat in sorted(quickwins, key=lambda c: -len(quickwins[c])):
+        items = quickwins[cat]
+        explain = _explain_quickwin(cat) or ""
+
+        item_cards = []
+        for qw in items:
+            cmd_block = ""
+            if qw.commands:
+                lines = []
+                for c in qw.commands:
+                    if c.startswith("#"):
+                        lines.append(f'<span class="cmt">{_escape(c)}</span>')
+                    else:
+                        lines.append(_escape(c))
+                cmd_block = f'<pre class="cmd-pre">{"<br>".join(lines)}</pre>'
+            item_cards.append(
+                f'<div class="qw-item">'
+                f'<div class="qw-item-name">{_kind_icon(qw.node_kind)} '
+                f'<code>{_escape(qw.node_name)}</code></div>'
+                f'<div class="qw-item-detail">{_escape(qw.detail)}</div>'
+                f'{cmd_block}'
+                f'</div>'
+            )
+
+        blocks.append(
+            f'<div class="qw-cat">'
+            f'<div class="qw-cat-head">'
+            f'<span class="qw-cat-title">{_escape(cat)}</span> '
+            f'<span class="qw-count-small">{len(items)}</span>'
+            f'</div>'
+            f'<div class="qw-cat-explain">{_escape(explain)}</div>'
+            f'<div class="qw-items">{"".join(item_cards)}</div>'
+            f'</div>'
+        )
+    return "".join(blocks)
+
+
+def _slug(s: str) -> str:
+    return "".join(c.lower() if c.isalnum() else "-" for c in s).strip("-")
+
+
+def _stats_html_block(stats: dict) -> str:
+    return (
+        '<details class="stats-details">'
+        '<summary>Graph statistics</summary>'
+        '<table class="data-table">'
+        '<tr><th>Metric</th><th>Value</th></tr>'
+        f'<tr><td>Total nodes</td><td>{stats["total_nodes"]}</td></tr>'
+        f'<tr><td>Total edges</td><td>{stats["total_edges"]}</td></tr>'
+        f'<tr><td>Pruned nodes (reachable to target)</td><td>{stats["pruned_nodes"]}</td></tr>'
+        f'<tr><td>Pruned edges</td><td>{stats["pruned_edges"]}</td></tr>'
+        f'<tr><td>Node reduction</td><td>{stats["reduction_pct"]}%</td></tr>'
+        '</table></details>'
+    )
+
+
+_HTML_HEAD = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pathdog — {{TITLE_SUFFIX}}</title>
+<style>
+  :root {
+    --bg: #0d1117; --card: #161b22; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --soft: #1c2128;
+    --code-bg: #010409; --code-text: #e6edf3; --code-cmt: #6e7681;
+    --primary: #58a6ff; --primary-soft: #1f3759;
+    --success: #3fb950; --success-soft: #0f2e1a;
+    --warn: #d29922; --warn-soft: #3d2e0a;
+    --danger: #f85149; --danger-soft: #3d1417;
+    --purple: #bc8cff; --purple-soft: #2d1a55;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 14px; line-height: 1.55; padding: 2rem 1.5rem; max-width: 1100px;
+    margin: 0 auto;
+  }
+  code, pre, .mono { font-family: "SF Mono", Menlo, Consolas, monospace; }
+  .title { color: var(--text); font-size: 1.05rem; margin-bottom: 1rem;
+           padding-bottom: .55rem; border-bottom: 1px solid var(--border); }
+  .title code { background: var(--soft); padding: .1rem .35rem;
+                border-radius: 3px; color: var(--primary); font-size: .85rem; }
+  h2 { font-size: 1rem; color: var(--text); margin: 0 0 .5rem; }
+  .more-section { background: var(--card); border: 1px solid var(--border);
+                  border-radius: 6px; padding: .55rem .85rem; margin-bottom: .65rem; }
+  .more-section > summary { cursor: pointer; list-style: none; color: var(--muted);
+                            font-size: .85rem; font-weight: 600; user-select: none; }
+  .more-section > summary::before { content: "▶ "; font-size: .65rem; }
+  .more-section[open] > summary::before { content: "▼ "; }
+  .more-section[open] > summary { color: var(--text); margin-bottom: .65rem;
+                                  padding-bottom: .4rem; border-bottom: 1px solid var(--border); }
+
+  /* VERDICT — one line, top of page */
+  .verdict { display: flex; align-items: center; gap: .65rem;
+             padding: .65rem 1rem; border-radius: 6px; margin-bottom: 1rem;
+             background: var(--card); border: 1px solid var(--border); }
+  .verdict-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .verdict-win  .verdict-dot { background: var(--success); }
+  .verdict-warn .verdict-dot { background: var(--warn); }
+  .verdict-fail .verdict-dot { background: var(--danger); }
+  .verdict-msg { font-size: .92rem; }
+  .verdict-msg b { color: var(--primary); }
+  .verdict-msg code { background: var(--soft); padding: .1rem .35rem; border-radius: 3px; }
+  .badge-dcsync { background: var(--purple-soft); color: var(--purple);
+                  border: 1px solid var(--purple); padding: .1rem .45rem;
+                  border-radius: 10px; font-size: .68rem; font-weight: 700;
+                  letter-spacing: .05em; margin-left: auto; }
+
+  /* SECTION */
+  .report-section { background: var(--card); border: 1px solid var(--border);
+                    border-radius: 10px; padding: 1.25rem 1.5rem; margin-bottom: 1.5rem; }
+  .section-lead { color: var(--muted); margin-bottom: 1rem; font-size: .9rem; }
+
+  /* PATH CARD */
+  .path-card { background: var(--card); border: 1px solid var(--border);
+               border-radius: 8px; margin-bottom: 1rem; overflow: hidden; }
+  .path-card.best { border-color: var(--success); }
+  .path-head { display: flex; align-items: center; gap: .75rem;
+               padding: .55rem .85rem; background: var(--soft);
+               border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .path-badge { background: var(--primary); color: var(--bg); font-weight: 700;
+                font-size: .7rem; padding: .15rem .5rem; border-radius: 10px;
+                letter-spacing: .05em; }
+  .path-badge.best { background: var(--success); }
+  .path-stat { color: var(--muted); font-size: .78rem; }
+  .chain-ascii { padding: .85rem 1rem; margin: 0; color: var(--text);
+                 font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .82rem;
+                 line-height: 1.6; white-space: pre; overflow-x: auto;
+                 border-bottom: 1px solid var(--border); }
+
+  /* CHAIN PILLS */
+  .path-chain { padding: .75rem 1.25rem; display: flex; flex-wrap: wrap;
+                gap: .35rem; align-items: center; }
+  .chain-pill { background: var(--soft); border: 1px solid var(--border);
+                padding: .25rem .55rem; border-radius: 5px; font-family: monospace;
+                font-size: .78rem; color: var(--text); }
+  .chain-pill.src { background: var(--success-soft); border-color: var(--success);
+                    color: var(--success); font-weight: 600; }
+  .chain-pill.dst { background: var(--danger-soft); border-color: var(--danger);
+                    color: var(--danger); font-weight: 600; }
+  .chain-pill.mini { font-size: .72rem; padding: .15rem .4rem; }
+  .chain-rel { color: var(--muted); font-size: .72rem; font-family: monospace;
+               padding: 0 .15rem; }
+  .chain-rel.mini { font-size: .68rem; }
+
+  /* DCSYNC BANNER */
+  .dcsync-banner { background: var(--purple-soft); color: var(--purple);
+                   padding: .75rem 1.25rem; border-top: 1px solid var(--border);
+                   border-bottom: 1px solid var(--border); font-size: .88rem; }
+  .dcsync-banner code { background: var(--card); padding: .1rem .3rem;
+                        border-radius: 3px; font-size: .82rem; }
+
+  /* STEPS */
+  .path-steps { padding: 0; }
+  .step { display: flex; gap: .85rem; padding: .85rem 1rem;
+          border-top: 1px solid var(--border); }
+  .step:first-child { border-top: none; }
+  .step-num { flex-shrink: 0; width: 24px; height: 24px; border-radius: 50%;
+              background: var(--primary); color: var(--bg); display: flex;
+              align-items: center; justify-content: center; font-weight: 700;
+              font-size: .75rem; }
+  .step-structural { padding: .35rem 1rem; opacity: .65; }
+  .step-structural .step-num { background: var(--soft); color: var(--muted);
+                               border: 1px solid var(--border); width: 18px;
+                               height: 18px; font-size: .7rem; }
+  .step-body { flex: 1; min-width: 0; }
+  .step-headline { font-size: .88rem; margin-bottom: .3rem; display: flex;
+                   align-items: center; gap: .35rem; flex-wrap: wrap;
+                   color: var(--muted); }
+  .step-headline code { background: var(--soft); padding: .1rem .35rem;
+                        border-radius: 3px; font-size: .8rem; color: var(--text); }
+  .step-arrow { color: var(--muted); }
+  .step-meta { color: var(--muted); font-size: .78rem; }
+  .step-title { font-weight: 700; color: var(--primary); margin-bottom: .15rem;
+                font-size: .95rem; }
+  .step-explain { color: var(--text); font-size: .85rem; margin-bottom: .45rem;
+                  opacity: .9; }
+  .step-impact { background: var(--soft); padding: .4rem .7rem;
+                 border-radius: 4px; font-size: .82rem; margin-bottom: .55rem;
+                 border-left: 3px solid var(--primary); color: var(--text); }
+  .step-impact b { color: var(--primary); }
+
+  /* REL TAG */
+  .rel-tag { background: var(--warn-soft); color: var(--warn); border: 1px solid var(--warn);
+             padding: .1rem .4rem; border-radius: 4px; font-family: monospace;
+             font-size: .72rem; font-weight: 600; }
+
+  /* IDENTITY CHANGE */
+  .ident-change { color: var(--purple); font-size: .85rem; margin-top: .5rem; }
+  .ident-change code { background: var(--purple-soft); padding: .1rem .35rem;
+                       border-radius: 3px; color: var(--purple); }
+  .ident-arrow { font-weight: 700; }
+
+  /* COMMANDS */
+  .cmd-details { margin: .35rem 0 0; }
+  .cmd-details > summary { cursor: pointer; color: var(--primary);
+                           font-size: .76rem; font-weight: 600; padding: .15rem 0;
+                           list-style: none; user-select: none; }
+  .cmd-details > summary::before { content: "▶ "; font-size: .6rem; }
+  .cmd-details[open] > summary::before { content: "▼ "; }
+  .cmd-details > summary:hover { color: var(--text); }
+  .cmd-pre { background: var(--code-bg); color: var(--code-text);
+             padding: .85rem 1rem; margin: 0; font-size: .8rem;
+             line-height: 1.7; overflow-x: auto;
+             white-space: pre-wrap; word-break: break-word; }
+  .cmd-pre.small { font-size: .76rem; padding: .55rem .75rem;
+                   border-radius: 5px; margin-top: .35rem; }
+  .cmd-pre .cmt { color: var(--code-cmt); }
+
+  /* FLAG PILLS */
+  .flag-pill { display: inline-block; font-size: .68rem; font-weight: 600;
+               padding: .1rem .45rem; border-radius: 10px; border: 1px solid;
+               margin-left: .25rem; }
+
+  /* PIVOTS / INTERMEDIATES */
+  .pivot-card { background: var(--card); border: 1px solid var(--border);
+                border-radius: 6px; margin-bottom: .85rem; overflow: hidden; }
+  .pivot-head { display: flex; align-items: center; gap: .55rem;
+                padding: .55rem .85rem; background: var(--soft);
+                border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .pivot-rank { background: var(--primary); color: var(--bg); font-weight: 700;
+                font-size: .7rem; padding: .15rem .45rem; border-radius: 8px; }
+  .pivot-name { font-weight: 600; color: var(--text); }
+  .pivot-name code { background: var(--soft); padding: .1rem .35rem;
+                     border-radius: 3px; }
+  .pivot-stat { color: var(--muted); font-size: .78rem; }
+  .pivot-body { padding: .65rem .85rem; }
+  .pivot-chain-label { color: var(--muted); font-size: .78rem;
+                       margin: .55rem 0 .25rem; font-weight: 600; }
+
+  /* VECTOR (out-of-band attack) */
+  .vector-block { background: var(--soft); border-left: 3px solid var(--warn);
+                  padding: .55rem .75rem; border-radius: 4px;
+                  margin-bottom: .5rem; }
+  .vector-name { font-weight: 600; font-size: .85rem; color: var(--warn); }
+  .vector-explain { color: var(--text); font-size: .82rem; margin-top: .2rem;
+                    opacity: .9; }
+
+  /* QUICK-WINS */
+  .qw-cat { margin-bottom: 1.25rem; padding-bottom: 1rem;
+            border-bottom: 1px dashed var(--border); }
+  .qw-cat:last-child { border-bottom: none; }
+  .qw-cat-head { display: flex; align-items: baseline; gap: .55rem;
+                 margin-bottom: .35rem; }
+  .qw-cat-title { color: var(--warn); font-weight: 700; font-size: .98rem; }
+  .qw-cat-explain { color: var(--muted); font-size: .82rem;
+                    margin-bottom: .65rem; }
+  .qw-count-small { background: var(--soft); color: var(--muted);
+                    padding: .1rem .4rem; border-radius: 8px;
+                    font-size: .7rem; font-weight: 700; }
+  .qw-items { display: flex; flex-direction: column; gap: .55rem; }
+  .qw-item { background: var(--soft); border: 1px solid var(--border);
+             border-radius: 5px; padding: .55rem .75rem; }
+  .qw-item-name { font-size: .88rem; margin-bottom: .2rem; }
+  .qw-item-name code { background: var(--card); padding: .1rem .35rem;
+                       border-radius: 3px; color: var(--text); }
+  .qw-item-detail { color: var(--muted); font-size: .8rem;
+                    margin-bottom: .35rem; }
+  .qw-item .cmd-pre { margin-top: .35rem; font-size: .76rem;
+                      padding: .55rem .7rem; border-radius: 4px; }
+
+  /* QUICK-WINS */
+  .qw-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+              gap: .65rem; margin-bottom: 1.25rem; }
+  .qw-tile { background: var(--soft); border: 1px solid var(--border);
+             border-radius: 8px; padding: .75rem .85rem; text-decoration: none;
+             color: var(--text); transition: all .15s; }
+  .qw-tile:hover { background: var(--primary-soft); border-color: var(--primary); }
+  .qw-tile-num { font-size: 1.4rem; font-weight: 700; color: var(--primary); }
+  .qw-tile-cat { font-size: .75rem; color: var(--muted); margin-top: .15rem; }
+  .qw-section { margin-bottom: .85rem; border: 1px solid var(--border);
+                border-radius: 8px; padding: .75rem 1rem; background: var(--card); }
+  .qw-section > summary { cursor: pointer; list-style: none; display: flex;
+                          align-items: center; gap: .5rem; font-weight: 600; }
+  .qw-section > summary::before { content: "▶"; font-size: .7rem; color: var(--muted); }
+  .qw-section[open] > summary::before { content: "▼"; }
+  .qw-cat { font-size: .95rem; }
+  .qw-count { background: var(--soft); color: var(--muted); font-size: .72rem;
+              padding: .15rem .45rem; border-radius: 10px; font-weight: 700; }
+  .qw-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+             gap: .6rem; margin-top: .75rem; }
+  .qw-card { background: var(--soft); border: 1px solid var(--border);
+             border-radius: 6px; padding: .6rem .75rem; }
+  .qw-card-name { font-weight: 600; font-size: .85rem; margin-bottom: .2rem; }
+  .qw-card-detail { color: var(--muted); font-size: .8rem; margin-bottom: .35rem; }
+
+  /* DATA TABLE */
+  .data-table { width: 100%; border-collapse: collapse; margin-top: .5rem; }
+  .data-table th, .data-table td { padding: .45rem .75rem; text-align: left;
+                                   border-bottom: 1px solid var(--border);
+                                   font-size: .85rem; }
+  .data-table th { background: var(--soft); font-weight: 600; color: var(--muted);
+                   font-size: .75rem; letter-spacing: .03em; text-transform: uppercase; }
+  .data-table .num { font-family: monospace; color: var(--muted); }
+  .data-table code { background: var(--soft); padding: .1rem .35rem;
+                     border-radius: 3px; }
+  .chain-cell { white-space: nowrap; overflow-x: auto; max-width: 480px; }
+
+  /* STATS */
+  .stats-details { margin-bottom: 1.25rem; background: var(--card);
+                   border: 1px solid var(--border); border-radius: 8px;
+                   padding: .65rem 1rem; }
+  .stats-details > summary { cursor: pointer; color: var(--muted);
+                             font-size: .82rem; font-weight: 600; }
+
+  /* USER BLOCK (multi-user) */
+  .user-block { margin-bottom: 1.5rem; padding-bottom: 1rem;
+                border-bottom: 1px dashed var(--border); }
+  .user-block:last-of-type { border-bottom: none; }
+  .user-tag { color: var(--success); font-size: .9rem; margin-bottom: .5rem; }
+  .user-tag code { background: var(--soft); padding: .15rem .4rem;
+                   border-radius: 4px; color: var(--success); }
+
+  /* USER SECTION (multi-user) */
+  .user-section { margin-bottom: 2rem; }
+  .user-section-head { background: var(--card); border: 1px solid var(--border);
+                       border-left: 4px solid var(--primary); border-radius: 8px;
+                       padding: .65rem 1rem; margin-bottom: 1rem; }
+  .user-section-head .label { font-size: .68rem; color: var(--muted);
+                              letter-spacing: .12em; text-transform: uppercase;
+                              font-weight: 700; margin-bottom: .15rem; }
+  .user-section-head .who { font-family: monospace; font-weight: 600; }
+  .user-section .verdict { margin-bottom: .85rem; }
+  .empty-block { background: var(--soft); border: 1px solid var(--border);
+                 border-radius: 8px; padding: 1rem; color: var(--muted);
+                 text-align: center; font-size: .9rem; }
+
+  footer { color: var(--muted); font-size: .75rem; padding-top: 1rem;
+           border-top: 1px solid var(--border); margin-top: 2rem; text-align: center; }
+  footer a { color: var(--primary); text-decoration: none; }
+</style>
+</head>
+<body>
+"""
+
+
+def render_html(
+    paths: list,
+    G: "nx.DiGraph",
+    source: str,
+    target: str,
+    stats: dict | None = None,
+    intermediate: list[dict] | None = None,
+    quickwins: dict[str, list["QuickWin"]] | None = None,
+    pivots: list[dict] | None = None,
+) -> str:
+    src_name = _escape(_display_name(G, source))
+    tgt_name = _escape(_display_name(G, target))
+
+    head = _HTML_HEAD.replace("{{TITLE_SUFFIX}}", "Attack Path Report")
+    body_parts = [
+        head,
+        f'<div class="title">🐶 Pathdog &nbsp;·&nbsp; '
+        f'<code>{src_name}</code> → <code>{tgt_name}</code></div>',
+        _verdict_html(G, source, target, paths, pivots),
+    ]
+
+    # ── Best path visible by default ──────────────────────────────────────────
+    if paths:
+        body_parts.append(_path_card_html(paths[0], G, 1, is_best=True))
+        # Extra paths collapsed
+        if len(paths) > 1:
+            extra = "".join(
+                _path_card_html(p, G, i, is_best=False)
+                for i, p in enumerate(paths[1:], 2)
+            )
+            body_parts.append(
+                f'<details class="more-section">'
+                f'<summary>More paths ({len(paths) - 1})</summary>'
+                f'{extra}</details>'
+            )
+
+    # ── Pivots, intermediates, quickwins — visible by default ────────────────
+    if pivots:
+        body_parts.append(
+            f'<details class="more-section" open>'
+            f'<summary>Pivot candidates ({len(pivots)})</summary>'
+            f'{_pivots_html(G, pivots)}</details>'
+        )
+    if intermediate:
+        body_parts.append(
+            f'<details class="more-section" open>'
+            f'<summary>Intermediate targets ({len(intermediate)})</summary>'
+            f'{_intermediate_html(G, source, intermediate)}</details>'
+        )
+    if quickwins:
+        n = sum(len(v) for v in quickwins.values())
+        body_parts.append(
+            f'<details class="more-section" open>'
+            f'<summary>Domain quick-wins ({n})</summary>'
+            f'{_quickwins_html(quickwins)}</details>'
+        )
+    if stats:
+        body_parts.append(
+            f'<details class="more-section">'
+            f'<summary>Graph stats</summary>'
+            f'{_stats_html_block(stats)}</details>'
+        )
+
+    body_parts.append('<footer>Generated by '
+                      '<a href="https://github.com/dikabraxis/pathdog">pathdog</a></footer>')
+    body_parts.append('</body></html>')
+    return "\n".join(body_parts)
 
 
 def render_html_multi(
@@ -805,40 +1179,65 @@ def render_html_multi(
             pivots=pivots,
         )
 
-    target_name = _escape(_display_name(G, target))
-    stats_block = _STATS_HTML.format(**stats) if stats else ""
+    tgt_name = _escape(_display_name(G, target))
+    head = _HTML_HEAD.replace("{{TITLE_SUFFIX}}", "Multi-User Attack Path Report")
 
-    sections: list[str] = []
+    body_parts = [
+        head,
+        f'<div class="title">🐶 Pathdog &nbsp;·&nbsp; '
+        f'target <code>{tgt_name}</code> &nbsp;·&nbsp; {len(results)} owned</div>',
+    ]
+
+    # One block per user — best path visible, rest collapsed
     for source, paths in results:
         src_label = _escape(_display_name(G, source))
-        parts = [
-            '<div class="user-section">',
-            f'<div class="user-banner">&#128100; Owned: {src_label} &nbsp;&#8594;&nbsp; {target_name}</div>',
-        ]
-        if not paths:
-            parts.append(_NO_PATH_HTML.format(source=src_label, target=target_name))
+        body_parts.append(f'<div class="user-block">')
+        body_parts.append(f'<div class="user-tag">👤 <code>{src_label}</code></div>')
+        body_parts.append(_verdict_html(G, source, target, paths, pivots))
+        if paths:
+            body_parts.append(_path_card_html(paths[0], G, 1, is_best=True))
+            if len(paths) > 1:
+                extra = "".join(
+                    _path_card_html(p, G, i, is_best=False)
+                    for i, p in enumerate(paths[1:], 2)
+                )
+                body_parts.append(
+                    f'<details class="more-section">'
+                    f'<summary>More paths ({len(paths) - 1})</summary>'
+                    f'{extra}</details>'
+                )
+        else:
             inter = intermediates.get(source)
             if inter:
-                parts.append(_intermediate_html(G, source, inter))
-        else:
-            parts.append(f'<h2>Paths Found: {len(paths)}</h2>')
-            for i, p in enumerate(paths, 1):
-                parts.append(_render_path_html(p, G, i))
-        parts.append("</div>")
-        sections.append("\n".join(parts))
+                body_parts.append(
+                    f'<details class="more-section" open>'
+                    f'<summary>Intermediate targets ({len(inter)})</summary>'
+                    f'{_intermediate_html(G, source, inter)}</details>'
+                )
+        body_parts.append('</div>')
 
+    # Global sections (pivots / quickwins) — open; stats — collapsed
     if pivots:
-        sections.append(_pivots_html(G, pivots))
-
-    if quickwins:
-        sections.append(_quickwins_html(quickwins))
-
-    return (
-        _HTML_MULTI_TEMPLATE
-        .replace("{{TARGET_NAME}}", target_name)
-        .replace("{{STATS_BLOCK}}", stats_block)
-        .replace(
-            "{{SECTIONS}}",
-            "\n<hr style='border-color:var(--border);margin:2rem 0'>\n".join(sections),
+        body_parts.append(
+            f'<details class="more-section" open>'
+            f'<summary>Pivot candidates ({len(pivots)})</summary>'
+            f'{_pivots_html(G, pivots)}</details>'
         )
-    )
+    if quickwins:
+        n = sum(len(v) for v in quickwins.values())
+        body_parts.append(
+            f'<details class="more-section" open>'
+            f'<summary>Domain quick-wins ({n})</summary>'
+            f'{_quickwins_html(quickwins)}</details>'
+        )
+    if stats:
+        body_parts.append(
+            f'<details class="more-section">'
+            f'<summary>Graph stats</summary>'
+            f'{_stats_html_block(stats)}</details>'
+        )
+
+    body_parts.append('<footer>Generated by '
+                      '<a href="https://github.com/dikabraxis/pathdog">pathdog</a></footer>')
+    body_parts.append('</body></html>')
+    return "\n".join(body_parts)
