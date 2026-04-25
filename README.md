@@ -38,7 +38,7 @@ python pathdog.py -z <dump.zip> -u <user> [options]
 ## Examples
 
 ```bash
-# Basic — find paths from a single owned user
+# Basic, find paths from a single owned user
 python pathdog.py -z corp.zip -u john.doe@corp.local
 
 # Multiple ZIPs, multiple users (paths can cross-chain between them)
@@ -60,18 +60,18 @@ python pathdog.py -z corp.zip --list all
 For each owned user, Pathdog produces a console summary plus a Markdown and
 HTML report. The HTML report shows:
 
-- **One-line verdict** at the top — path found, no path but pivot available,
+- **One-line verdict** at the top, path found, no path but pivot available,
   or nothing actionable.
 - **Best path** with an ASCII chain overview, then each hop as a card with
   a plain-English title, what it means, the impact, and the exact commands
   to run as the current identity.
-- **Pivot candidates** when no direct path exists — principals that already
+- **Pivot candidates** when no direct path exists, principals that already
   have a path to the target and can be compromised out-of-band (Kerberoast,
   AS-REP roast, weak password, LAPS, unconstrained delegation).
 - **Domain-wide quick-wins** surfaced from BloodHound node properties:
   AS-REP roastables, Kerberoastables, unconstrained delegation, LAPS-
   deployed hosts, ADCS templates, password-not-required accounts, DCs.
-- **Identity tracking** — commands at each hop use the identity you have
+- **Identity tracking**, commands at each hop use the identity you have
   *right now*, not the node label in the graph.
 
 Example chain (console output):
@@ -79,7 +79,7 @@ Example chain (console output):
 ```
 john.doe@corp.local
   └─[MemberOf]──► HELPDESK@corp.local
-       Structural relationship — no action required.
+       Structural relationship, no action required.
   └─[GenericWrite]──► svc_backup@corp.local
        $ pywhisker -d corp.local -u 'john.doe' ...
      → now operating as: svc_backup@corp.local
@@ -102,7 +102,7 @@ john.doe@corp.local
 
 - Both BloodHound legacy (v4) and BloodHound CE (v5+) ZIP formats are
   supported.
-- Multiple ZIPs are merged into a single graph before pathfinding —
+- Multiple ZIPs are merged into a single graph before pathfinding,
   duplicate nodes and edges are deduplicated automatically.
 - Pathdog synthesizes a `DCSync` edge when a principal holds both
   `GetChanges` and `GetChangesAll` on the same domain. Either right alone
