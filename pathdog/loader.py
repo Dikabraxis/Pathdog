@@ -201,9 +201,11 @@ def _extract_ce_arrays(objects: list[dict]) -> list[dict]:
                 rels.append({"StartNode": str(uid), "EndNode": str(cid), "RelationshipType": "HasSession"})
 
         # AllowedToDelegate: obj -[AllowedToDelegate]→ target
+        # Some BloodHound exports list raw SPN strings here ("cifs/host.domain")
+        # instead of ObjectIdentifiers — those don't resolve to graph nodes.
         for target in obj.get("AllowedToDelegate", []):
             t_id = target if isinstance(target, str) else target.get("ObjectIdentifier", "")
-            if t_id:
+            if t_id and "/" not in t_id:
                 rels.append({"StartNode": obj_id, "EndNode": str(t_id), "RelationshipType": "AllowedToDelegate"})
 
         # AllowedToAct (RBCD): principal -[AllowedToAct]→ obj
@@ -213,11 +215,17 @@ def _extract_ce_arrays(objects: list[dict]) -> list[dict]:
                 rels.append({"StartNode": str(eid), "EndNode": obj_id, "RelationshipType": "AllowedToAct"})
 
         # Domain trusts
+        # TrustDirection is int in legacy v4 (0/1/2/3) but BloodHound CE may
+        # emit a string code ("Inbound"/"Outbound"/"Bidirectional"/"Disabled").
         for trust in obj.get("Trusts", []):
             target_sid = trust.get("TargetDomainSid")
-            direction = trust.get("TrustDirection", 0)
             if not target_sid:
                 continue
+            raw = trust.get("TrustDirection", 0)
+            if isinstance(raw, str):
+                direction = {"inbound": 1, "outbound": 2, "bidirectional": 3}.get(raw.lower(), 0)
+            else:
+                direction = raw
             # 1=Inbound (target trusts us), 2=Outbound (we trust target), 3=Bidirectional
             if direction in (1, 3):
                 rels.append({"StartNode": obj_id, "EndNode": str(target_sid), "RelationshipType": "TrustedBy"})

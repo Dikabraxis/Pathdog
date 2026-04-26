@@ -47,7 +47,7 @@ examples:
                    dest="fmt", help="Output format (default: both)")
     p.add_argument("-l", "--list", metavar="KIND", nargs="?", const="all",
                    dest="list_kind",
-                   help="List nodes and exit. KIND: users, computers, groups, domains, all")
+                   help="List nodes and exit. KIND: users, computers, groups, domains, gpos, ous, all")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="Show graph statistics")
     p.add_argument("--no-fallback", action="store_true",
@@ -71,8 +71,8 @@ def _expand_users(raw: list[str]) -> tuple[list[str], int]:
             try:
                 with open(entry, encoding="utf-8") as fh:
                     from_file = [
-                        l.strip() for l in fh
-                        if l.strip() and not l.startswith("#")
+                        line.strip() for line in fh
+                        if line.strip() and not line.lstrip().startswith("#")
                     ]
                 print(f"[*] Loaded {len(from_file)} user(s) from {entry}")
                 users.extend(from_file)
