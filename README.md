@@ -140,6 +140,29 @@ Example console output (best path + summary; full breakdown lives in the HTML re
     full details + commands  →  see HTML report
 ```
 
+Example console output for `--node` (visibility on a single node):
+
+```
+  Node: john.doe@acme.local (users)  [PasswordNotReqd]
+  ───────────────────────────────────────────────────────
+
+  → OUTBOUND CONTROL  2 direct, 0 via group(s)
+    • CanPSRemote on DC.acme.local
+      +1 more privilege(s)  →  see HTML report
+
+  ← INBOUND CONTROL  6 principal(s) have privileges over this node
+    • KEY ADMINS@acme.local [AddKeyCredentialLink]
+      +5 more  →  see HTML report
+
+  → ATTACK PATHS  outbound to DOMAIN ADMINS@acme.local
+    ✓ 5 hops, weight 14
+      +2 more paths  →  see HTML report
+
+  ← INBOUND ATTACKERS  who can reach john.doe@acme.local
+    ! 10 principal(s) — closest: administrator@acme.local (2 hops)
+      full list  →  see HTML report
+```
+
 ANSI colors are emitted when stdout is a TTY (auto-disabled by `NO_COLOR=1`).
 
 ## Notes
