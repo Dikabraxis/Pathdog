@@ -49,8 +49,8 @@ examples:
                    help="Number of paths to find per user (default: 3)")
     p.add_argument("-o", "--output", default="pathdog_report", metavar="BASENAME",
                    help="Output file base name (default: pathdog_report)")
-    p.add_argument("-f", "--format", choices=["md", "html", "both"], default="both",
-                   dest="fmt", help="Output format (default: both)")
+    p.add_argument("-f", "--format", choices=["md", "html", "both"], default="html",
+                   dest="fmt", help="Output format (default: html)")
     p.add_argument("-l", "--list", metavar="KIND", nargs="?", const="all",
                    dest="list_kind",
                    help="List nodes and exit. KIND: users, computers, groups, domains, gpos, ous, all")

@@ -26,7 +26,7 @@ python pathdog.py -z <dump.zip> -u <user> [options]
 | `-t TARGET` | Target node. Defaults to auto-detected `DOMAIN ADMINS`. |
 | `-k N` | Number of paths per user (default `3`). |
 | `-o BASENAME` | Output base name (default `pathdog_report`). |
-| `-f md \| html \| both` | Report format (default `both`). |
+| `-f md \| html \| both` | Report format (default `html`). Pass `md` or `both` to also produce a Markdown report. |
 | `-l KIND` | List nodes and exit. `KIND` = `users`, `computers`, `groups`, `domains`, `gpos`, `ous`, `all`. |
 | `-v` | Show graph statistics. |
 | `--node NODE` | 360° visibility on a node, what it can reach (outbound) and who can reach it (inbound). No `-u` required. Combines with `-u` into a single HTML. |

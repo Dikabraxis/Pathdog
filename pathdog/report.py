@@ -696,7 +696,7 @@ def _pivots_html(G: "nx.DiGraph", pivots: list[dict]) -> str:
                     lines.append(_escape(c))
             cmd_block = f'<pre class="cmd-pre">{"<br>".join(lines)}</pre>'
 
-        # Onward path
+        # Onward path — chain always visible, per-hop commands collapsible
         chain = ""
         if ptd:
             lines = [_escape(_display_name(G, ptd.nodes[0]))]
@@ -704,9 +704,24 @@ def _pivots_html(G: "nx.DiGraph", pivots: list[dict]) -> str:
                 rel = _escape(edge["relation"])
                 dst = _escape(_display_name(G, edge["dst"]))
                 lines.append(f"  └─[{rel}]──► {dst}")
+            onward_steps_html: list[str] = []
+            actor = _display_name(G, ptd.nodes[0])
+            step_num = 0
+            for edge in ptd.edges:
+                if edge["relation"] in ("MemberOf", "Contains"):
+                    html, _ = _step_html(G, edge, actor, step_num)
+                    onward_steps_html.append(html)
+                else:
+                    step_num += 1
+                    html, actor = _step_html(G, edge, actor, step_num)
+                    onward_steps_html.append(html)
             chain = (
                 f'<div class="pivot-chain-label">Onward path to target:</div>'
                 f'<pre class="chain-ascii">{chr(10).join(lines)}</pre>'
+                f'<details class="more-section">'
+                f'<summary>Per-hop commands ({step_num})</summary>'
+                f'<div class="path-steps">{"".join(onward_steps_html)}</div>'
+                f'</details>'
             )
 
         cards.append(
@@ -728,38 +743,86 @@ def _pivots_html(G: "nx.DiGraph", pivots: list[dict]) -> str:
     return "".join(cards)
 
 
+def _collapsible_pivot_card_html(
+    G: "nx.DiGraph",
+    nid: str,
+    path,
+    score: int,
+    index: int,
+    extra_label: str = "",
+) -> str:
+    """Render a node entry as a collapsible card with full path + commands.
+
+    Head (always visible): rank, name, hops, score, flags, [DCSync].
+    Body (toggle): ASCII chain + per-hop steps with commands.
+    """
+    name = _escape(_display_name(G, nid))
+    kind = G.nodes[nid].get("kind", "?")
+    flags_html = _flag_pills_html(G, nid)
+    extra_html = f'<span class="pivot-stat">{_escape(extra_label)}</span>' if extra_label else ""
+
+    if not path:
+        return (
+            f'<div class="pivot-card">'
+            f'<div class="pivot-head">'
+            f'<span class="pivot-rank">#{index}</span>'
+            f'<span class="pivot-name">{_kind_icon(kind)} {name}</span>'
+            f'<span class="pivot-stat">no path</span>'
+            f'<span class="pivot-stat">score {score}</span>'
+            f'{extra_html}{flags_html}'
+            f'</div>'
+            f'</div>'
+        )
+
+    hops = path.hops
+    src_name = _display_name(G, path.nodes[0])
+    chain_lines = [_escape(src_name)]
+    for edge in path.edges:
+        rel = _escape(edge["relation"])
+        dst = _escape(_display_name(G, edge["dst"]))
+        chain_lines.append(f"  └─[{rel}]──► {dst}")
+    chain_ascii = "\n".join(chain_lines)
+
+    steps_html: list[str] = []
+    actor = src_name
+    step_num = 0
+    for edge in path.edges:
+        if edge["relation"] in ("MemberOf", "Contains"):
+            html, _ = _step_html(G, edge, actor, step_num)
+            steps_html.append(html)
+        else:
+            step_num += 1
+            html, actor = _step_html(G, edge, actor, step_num)
+            steps_html.append(html)
+
+    dcsync_pill = ""
+    if _path_yields_dcsync(G, path):
+        dcsync_pill = '<span class="badge-dcsync">DCSync</span>'
+
+    return (
+        f'<details class="pivot-card">'
+        f'<summary class="pivot-head">'
+        f'<span class="pivot-rank">#{index}</span>'
+        f'<span class="pivot-name">{_kind_icon(kind)} {name}</span>'
+        f'<span class="pivot-stat">{hops} hops</span>'
+        f'<span class="pivot-stat">score {score}</span>'
+        f'{extra_html}{dcsync_pill}{flags_html}'
+        f'</summary>'
+        f'<pre class="chain-ascii">{chain_ascii}</pre>'
+        f'<div class="path-steps">{"".join(steps_html)}</div>'
+        f'</details>'
+    )
+
+
 def _intermediate_html(
     G: "nx.DiGraph", source: str, suggestions: list[dict]
 ) -> str:
     if not suggestions:
         return ""
-    cards = []
-    for i, s in enumerate(suggestions, 1):
-        nid = s["node"]
-        path = s["path"]
-        name = _escape(_display_name(G, nid))
-        kind = G.nodes[nid].get("kind", "?")
-        hops = path.hops if path else "?"
-        chain = ""
-        if path:
-            lines = [_escape(_display_name(G, path.nodes[0]))]
-            for edge in path.edges:
-                rel = _escape(edge["relation"])
-                dst = _escape(_display_name(G, edge["dst"]))
-                lines.append(f"  └─[{rel}]──► {dst}")
-            chain = f'<pre class="chain-ascii">{chr(10).join(lines)}</pre>'
-        cards.append(
-            f'<div class="pivot-card">'
-            f'<div class="pivot-head">'
-            f'<span class="pivot-rank">#{i}</span>'
-            f'<span class="pivot-name">{_kind_icon(kind)} {name}</span>'
-            f'<span class="pivot-stat">{hops} hops</span>'
-            f'<span class="pivot-stat">score {s["score"]}</span>'
-            f'{_flag_pills_html(G, nid)}'
-            f'</div>'
-            f'<div class="pivot-body">{chain}</div>'
-            f'</div>'
-        )
+    cards = [
+        _collapsible_pivot_card_html(G, s["node"], s["path"], s["score"], i)
+        for i, s in enumerate(suggestions, 1)
+    ]
     return "".join(cards)
 
 
@@ -989,6 +1052,14 @@ _HTML_HEAD = """\
   /* PIVOTS / INTERMEDIATES */
   .pivot-card { background: var(--card); border: 1px solid var(--border);
                 border-radius: 6px; margin-bottom: .85rem; overflow: hidden; }
+  details.pivot-card > summary { cursor: pointer; list-style: none; user-select: none; }
+  details.pivot-card > summary::-webkit-details-marker { display: none; }
+  details.pivot-card > summary.pivot-head { border-bottom: 1px solid transparent; }
+  details.pivot-card[open] > summary.pivot-head { border-bottom-color: var(--border); }
+  details.pivot-card > summary.pivot-head::before {
+    content: "▶"; color: var(--muted); font-size: .65rem; margin-right: .15rem;
+  }
+  details.pivot-card[open] > summary.pivot-head::before { content: "▼"; }
   .pivot-head { display: flex; align-items: center; gap: .55rem;
                 padding: .55rem .85rem; background: var(--soft);
                 border-bottom: 1px solid var(--border); flex-wrap: wrap; }
@@ -1313,36 +1384,10 @@ def _inbound_sources_html(G: "nx.DiGraph", sources: list[dict]) -> str:
     """Render inbound source cards (who can reach the target node)."""
     if not sources:
         return '<div class="empty-block">No paths found from other principals.</div>'
-    cards = []
-    for i, s in enumerate(sources, 1):
-        nid = s["node"]
-        path = s["path"]
-        name = _escape(_display_name(G, nid))
-        kind = G.nodes[nid].get("kind", "?")
-        hops = path.hops if path else "?"
-        chain = ""
-        if path:
-            lines = [_escape(_display_name(G, path.nodes[0]))]
-            for edge in path.edges:
-                rel = _escape(edge["relation"])
-                dst = _escape(_display_name(G, edge["dst"]))
-                lines.append(f"  └─[{rel}]──► {dst}")
-            chain = (
-                f'<div class="pivot-chain-label">Path to target:</div>'
-                f'<pre class="chain-ascii">{chr(10).join(lines)}</pre>'
-            )
-        cards.append(
-            f'<div class="pivot-card">'
-            f'<div class="pivot-head">'
-            f'<span class="pivot-rank">#{i}</span>'
-            f'<span class="pivot-name">{_kind_icon(kind)} {name}</span>'
-            f'<span class="pivot-stat">{hops} hops</span>'
-            f'<span class="pivot-stat">score {s["score"]}</span>'
-            f'{_flag_pills_html(G, nid)}'
-            f'</div>'
-            f'<div class="pivot-body">{chain}</div>'
-            f'</div>'
-        )
+    cards = [
+        _collapsible_pivot_card_html(G, s["node"], s["path"], s["score"], i)
+        for i, s in enumerate(sources, 1)
+    ]
     return "".join(cards)
 
 
