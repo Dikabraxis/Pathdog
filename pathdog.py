@@ -11,6 +11,7 @@ from pathdog.graph import build_graph, resolve_target, prune_to_target, graph_st
 from pathdog.pathfinder import (
     find_paths, suggest_similar_nodes, find_intermediate_targets,
     find_pivot_candidates, find_inbound_sources,
+    find_outbound_object_control, find_inbound_object_control,
 )
 from pathdog.quickwins import collect_all as collect_quickwins
 from pathdog.report import (
@@ -185,11 +186,10 @@ def _do_node_visibility(G, args) -> int:
                 outbound_paths = find_paths(pruned, node_id, target, k=args.paths)
             except ValueError:
                 pass
-        if not outbound_paths:
-            print(f"[*] No direct path to target — computing reachable high-value targets ...")
-            outbound_intermediate = find_intermediate_targets(
-                G, node_id, excluded={target}, top_n=args.fallback_top,
-            )
+        print(f"[*] Computing reachable high-value targets ...")
+        outbound_intermediate = find_intermediate_targets(
+            G, node_id, excluded={target}, top_n=args.fallback_top,
+        )
     else:
         outbound_intermediate = find_intermediate_targets(
             G, node_id, excluded=set(), top_n=args.fallback_top,
@@ -200,8 +200,18 @@ def _do_node_visibility(G, args) -> int:
     if inbound_sources:
         print(f"[*] Inbound: {len(inbound_sources)} principal(s) with a path to this node")
 
+    print(f"[*] Computing object control ...")
+    outbound_control = find_outbound_object_control(G, node_id)
+    inbound_control = find_inbound_object_control(G, node_id)
+    if outbound_control:
+        direct = sum(1 for e in outbound_control if e["via_group"] is None)
+        print(f"[*] Outbound control: {direct} direct, "
+              f"{len(outbound_control) - direct} via group(s)")
+
     print_node_visibility_console(
-        G, node_id, target, outbound_paths, outbound_intermediate, inbound_sources,
+        G, node_id, target,
+        outbound_paths, outbound_intermediate, inbound_sources,
+        outbound_control, inbound_control,
     )
 
     stats = None
@@ -218,8 +228,9 @@ def _do_node_visibility(G, args) -> int:
         md_path = f"{base}.md"
         with open(md_path, "w", encoding="utf-8") as fh:
             fh.write(render_markdown_node_visibility(
-                G, node_id, target, outbound_paths, outbound_intermediate,
-                inbound_sources, stats,
+                G, node_id, target,
+                outbound_paths, outbound_intermediate, inbound_sources, stats,
+                outbound_control, inbound_control,
             ))
         written.append(md_path)
 
@@ -227,8 +238,9 @@ def _do_node_visibility(G, args) -> int:
         html_path = f"{base}.html"
         with open(html_path, "w", encoding="utf-8") as fh:
             fh.write(render_html_node_visibility(
-                G, node_id, target, outbound_paths, outbound_intermediate,
-                inbound_sources, stats,
+                G, node_id, target,
+                outbound_paths, outbound_intermediate, inbound_sources, stats,
+                outbound_control, inbound_control,
             ))
         written.append(html_path)
 
@@ -346,11 +358,10 @@ def main() -> int:
 
         if paths:
             any_path_found = True
-        else:
-            if not args.no_fallback:
-                intermediates[source] = find_intermediate_targets(
-                    G, source, excluded={target}, top_n=args.fallback_top,
-                )
+        if not args.no_fallback:
+            intermediates[source] = find_intermediate_targets(
+                G, source, excluded={target}, top_n=args.fallback_top,
+            )
         all_results.append((source, paths))
 
     # ── Quick wins (domain-wide, computed once) ───────────────────────────────
@@ -382,7 +393,7 @@ def main() -> int:
             print(f"  Owned user: {src_label}")
             print(f"{'═' * 60}")
         print_paths_console(paths, G, source, target)
-        if not paths and source in intermediates:
+        if source in intermediates:
             print_intermediate_targets(G, source, intermediates[source])
 
     if pivots:

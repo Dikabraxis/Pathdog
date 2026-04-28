@@ -296,6 +296,78 @@ def find_pivot_candidates(
     return out[:top_n]
 
 
+def find_outbound_object_control(
+    G: nx.DiGraph,
+    node_id: str,
+) -> list[dict]:
+    """List objects this node has privileges over (direct + via group membership).
+
+    Returns [{"dst", "relation", "via_group"}, ...] where via_group is the
+    display name of the intermediary group, or None for direct edges.
+    Structural relations (MemberOf, Contains) are excluded.
+    """
+    if node_id not in G:
+        return []
+
+    groups: dict[str, str] = {}
+    frontier = [node_id]
+    visited = {node_id}
+    while frontier:
+        nxt = []
+        for n in frontier:
+            for _, succ in G.out_edges(n):
+                if G[n][succ].get("relation") == "MemberOf" and succ not in visited:
+                    visited.add(succ)
+                    groups[succ] = G.nodes[succ].get("name", succ) if succ in G else succ
+                    nxt.append(succ)
+        frontier = nxt
+
+    seen: set[tuple] = set()
+    results: list[dict] = []
+
+    for _, dst in G.out_edges(node_id):
+        rel = G[node_id][dst].get("relation", "Unknown")
+        if rel in ("MemberOf", "Contains"):
+            continue
+        key = (dst, rel)
+        if key not in seen:
+            seen.add(key)
+            results.append({"dst": dst, "relation": rel, "via_group": None})
+
+    for grp_id, grp_name in groups.items():
+        for _, dst in G.out_edges(grp_id):
+            rel = G[grp_id][dst].get("relation", "Unknown")
+            if rel in ("MemberOf", "Contains"):
+                continue
+            key = (dst, rel)
+            if key not in seen:
+                seen.add(key)
+                results.append({"dst": dst, "relation": rel, "via_group": grp_name})
+
+    results.sort(key=lambda x: (x["via_group"] is not None, x["relation"]))
+    return results
+
+
+def find_inbound_object_control(
+    G: nx.DiGraph,
+    node_id: str,
+) -> list[dict]:
+    """List principals that have direct privileges over this node.
+
+    Returns [{"src", "relation"}, ...] excluding structural relations.
+    """
+    if node_id not in G:
+        return []
+    results = []
+    for src, _ in G.in_edges(node_id):
+        rel = G[src][node_id].get("relation", "Unknown")
+        if rel in ("MemberOf", "Contains"):
+            continue
+        results.append({"src": src, "relation": rel})
+    results.sort(key=lambda x: x["relation"])
+    return results
+
+
 def find_inbound_sources(
     G: nx.DiGraph,
     target_node: str,
