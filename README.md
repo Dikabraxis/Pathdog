@@ -55,7 +55,7 @@ python pathdog.py -z corp.zip -u alice@corp.local -t DC01.corp.local
 python pathdog.py -z corp.zip --list users
 python pathdog.py -z corp.zip --list all
 
-# 360° visibility on a node — what it can reach and who can reach it
+# 360° visibility on a node, what it can reach and who can reach it
 python pathdog.py -z corp.zip --node svc_backup@corp.local
 
 # Combine -u and --node, single HTML with both sections
@@ -86,16 +86,16 @@ HTML report. The HTML report shows:
 Use `--node` to get a 360° picture of any node without targeting Domain
 Admins. The HTML report contains:
 
-- **Attack paths** — outbound chains from this node to DA (or `-t TARGET`),
+- **Attack paths**, outbound chains from this node to DA (or `-t TARGET`),
   with the same per-hop command breakdown as `-u`.
-- **Other reachable high-value targets** (collapsible) — interesting
+- **Other reachable high-value targets** (collapsible), interesting
   intermediate nodes this node can reach, useful as pivot steps even when
   no direct DA path exists.
-- **Inbound attackers** (collapsible) — principals with a full attack path
+- **Inbound attackers** (collapsible), principals with a full attack path
   *leading to* this node, ranked by how exploitable they are.
-- **Outbound object control** (collapsible) — every object this node has
+- **Outbound object control** (collapsible), every object this node has
   privileges over, directly or through group membership.
-- **Inbound object control** (collapsible) — principals with direct
+- **Inbound object control** (collapsible), principals with direct
   privileges over this node.
 
 When you pass both `-u` and `--node`, Pathdog produces a single combined
@@ -159,7 +159,7 @@ Example console output for `--node` (visibility on a single node):
       +2 more paths  →  see HTML report
 
   ← INBOUND ATTACKERS  who can reach john.doe@acme.local
-    ! 10 principal(s) — closest: administrator@acme.local (2 hops)
+    ! 10 principal(s), closest: administrator@acme.local (2 hops)
       full list  →  see HTML report
 ```
 
