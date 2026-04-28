@@ -19,6 +19,7 @@ from pathdog.report import (
     print_intermediate_targets, print_quickwins, print_pivot_candidates,
     print_node_visibility_console,
     render_html_node_visibility, render_markdown_node_visibility,
+    render_html_combined,
 )
 
 
@@ -151,8 +152,8 @@ def _do_list(G, kind: str) -> None:
     print(f"\n{count} node(s) listed.")
 
 
-def _do_node_visibility(G, args) -> int:
-    """Handle --node mode: show outbound and inbound paths for a given node."""
+def _collect_node_data(G, args) -> dict | None:
+    """Collect all node visibility data. Returns a dict or None if node not found."""
     node_id, exact = _resolve_source(G, args.node)
     if not node_id:
         print(f"[!] Node '{args.node}' not found in graph.", file=sys.stderr)
@@ -161,12 +162,11 @@ def _do_node_visibility(G, args) -> int:
             print("    Did you mean one of:", file=sys.stderr)
             for s in suggestions:
                 print(f"      - {s}", file=sys.stderr)
-        return 1
+        return None
     if not exact:
         print(f"[~] Fuzzy match for '{args.node}' → '{node_id}'")
     print(f"[*] Node visibility for: {node_id}")
 
-    # Resolve outbound target (DA or custom); graceful if missing
     target = resolve_target(G, args.target)
     if args.target and not target:
         print(f"[!] Target '{args.target}' not found — outbound will show intermediate targets.",
@@ -208,15 +208,33 @@ def _do_node_visibility(G, args) -> int:
         print(f"[*] Outbound control: {direct} direct, "
               f"{len(outbound_control) - direct} via group(s)")
 
-    print_node_visibility_console(
-        G, node_id, target,
-        outbound_paths, outbound_intermediate, inbound_sources,
-        outbound_control, inbound_control,
-    )
-
-    stats = None
+    node_stats = None
     if args.verbose and pruned is not None:
-        stats = graph_stats(G, pruned)
+        node_stats = graph_stats(G, pruned)
+
+    return {
+        "node_id": node_id,
+        "target": target,
+        "outbound_paths": outbound_paths,
+        "outbound_intermediate": outbound_intermediate,
+        "inbound_sources": inbound_sources,
+        "outbound_control": outbound_control,
+        "inbound_control": inbound_control,
+        "stats": node_stats,
+    }
+
+
+def _do_node_visibility(G, args) -> int:
+    """Handle standalone --node mode: collect data, print console, write report."""
+    data = _collect_node_data(G, args)
+    if data is None:
+        return 1
+
+    print_node_visibility_console(
+        G, data["node_id"], data["target"],
+        data["outbound_paths"], data["outbound_intermediate"],
+        data["inbound_sources"], data["outbound_control"], data["inbound_control"],
+    )
 
     written: list[str] = []
     base = args.output
@@ -228,9 +246,10 @@ def _do_node_visibility(G, args) -> int:
         md_path = f"{base}.md"
         with open(md_path, "w", encoding="utf-8") as fh:
             fh.write(render_markdown_node_visibility(
-                G, node_id, target,
-                outbound_paths, outbound_intermediate, inbound_sources, stats,
-                outbound_control, inbound_control,
+                G, data["node_id"], data["target"],
+                data["outbound_paths"], data["outbound_intermediate"],
+                data["inbound_sources"], data["stats"],
+                data["outbound_control"], data["inbound_control"],
             ))
         written.append(md_path)
 
@@ -238,9 +257,10 @@ def _do_node_visibility(G, args) -> int:
         html_path = f"{base}.html"
         with open(html_path, "w", encoding="utf-8") as fh:
             fh.write(render_html_node_visibility(
-                G, node_id, target,
-                outbound_paths, outbound_intermediate, inbound_sources, stats,
-                outbound_control, inbound_control,
+                G, data["node_id"], data["target"],
+                data["outbound_paths"], data["outbound_intermediate"],
+                data["inbound_sources"], data["stats"],
+                data["outbound_control"], data["inbound_control"],
             ))
         written.append(html_path)
 
@@ -269,9 +289,20 @@ def main() -> int:
         _do_list(G, args.list_kind)
         return 0
 
-    # ── --node mode: outbound + inbound visibility (no -u required) ───────────
+    # ── --node mode: collect data (standalone) or store for combined report ────
+    node_data = None
     if args.node:
-        return _do_node_visibility(G, args)
+        if not args.users:
+            return _do_node_visibility(G, args)
+        node_data = _collect_node_data(G, args)
+        if node_data:
+            print_node_visibility_console(
+                G, node_data["node_id"], node_data["target"],
+                node_data["outbound_paths"], node_data["outbound_intermediate"],
+                node_data["inbound_sources"], node_data["outbound_control"],
+                node_data["inbound_control"],
+            )
+            print()
 
     # ── Validate -u is provided for path-finding ──────────────────────────────
     if not args.users:
@@ -423,10 +454,16 @@ def main() -> int:
     if args.fmt in ("html", "both"):
         html_path = f"{base}.html"
         with open(html_path, "w", encoding="utf-8") as fh:
-            fh.write(render_html_multi(
-                all_results, G, target, report_stats,
-                intermediates=intermediates, quickwins=quickwins, pivots=pivots,
-            ))
+            if node_data:
+                fh.write(render_html_combined(
+                    all_results, G, target, node_data, report_stats,
+                    intermediates=intermediates, quickwins=quickwins, pivots=pivots,
+                ))
+            else:
+                fh.write(render_html_multi(
+                    all_results, G, target, report_stats,
+                    intermediates=intermediates, quickwins=quickwins, pivots=pivots,
+                ))
         written.append(html_path)
 
     if written:

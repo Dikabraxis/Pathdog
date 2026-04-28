@@ -1372,33 +1372,11 @@ def render_html_node_visibility(
         f' &nbsp;·&nbsp; <code>{node_name}</code> {flags_html}</div>',
     ]
 
-    # ── Outbound object control ───────────────────────────────────────────────
+    # ── Attack paths (outbound) + collapsible secondary sections ─────────────
     direct_count = sum(1 for e in outbound_control if e["via_group"] is None)
     indirect_count = len(outbound_control) - direct_count
-    body_parts.append(
-        f'<div class="report-section">'
-        f'<h2>→ Outbound Object Control '
-        f'<span style="font-weight:400;color:var(--muted);font-size:.82rem">'
-        f'{direct_count} direct · {indirect_count} via group</span></h2>'
-        f'<p class="section-lead">All objects this node has privileges over '
-        f'(directly or through group membership).</p>'
-        f'{_object_control_out_html(G, outbound_control)}'
-        f'</div>'
-    )
+    inbound_count = len(inbound_sources)
 
-    # ── Inbound object control ────────────────────────────────────────────────
-    body_parts.append(
-        f'<div class="report-section">'
-        f'<h2>← Inbound Object Control '
-        f'<span style="font-weight:400;color:var(--muted);font-size:.82rem">'
-        f'{len(inbound_control)} principal(s)</span></h2>'
-        f'<p class="section-lead">Principals that have direct privileges over '
-        f'<code>{node_name}</code>.</p>'
-        f'{_object_control_in_html(G, inbound_control)}'
-        f'</div>'
-    )
-
-    # ── Attack paths (outbound) ───────────────────────────────────────────────
     outbound_path_label = (
         f"→ Attack Paths — outbound to {tgt_display}"
         if target else "→ Attack Paths — reachable targets"
@@ -1418,34 +1396,51 @@ def render_html_node_visibility(
         if outbound_intermediate:
             outbound_path_content += (
                 f'<details class="more-section" open>'
-                f'<summary>Other reachable high-value targets ({len(outbound_intermediate)})</summary>'
+                f'<summary>Other reachable high-value targets ({len(outbound_intermediate)})'
+                f' — nodes reachable from here, useful as pivot steps even without a direct DA path'
+                f'</summary>'
                 f'{_intermediate_html(G, node, outbound_intermediate)}</details>'
             )
     elif outbound_intermediate:
-        outbound_path_content = _intermediate_html(G, node, outbound_intermediate)
+        outbound_path_content = (
+            f'<details class="more-section" open>'
+            f'<summary>Other reachable high-value targets ({len(outbound_intermediate)})'
+            f' — nodes reachable from here, useful as pivot steps even without a direct DA path'
+            f'</summary>'
+            f'{_intermediate_html(G, node, outbound_intermediate)}</details>'
+        )
     else:
         outbound_path_content = (
             '<div class="empty-block">No outbound paths to high-value targets.</div>'
         )
+
+    outbound_path_content += (
+        f'<details class="more-section">'
+        f'<summary>← Inbound Attackers ({inbound_count} principal(s))'
+        f' — who has an attack path leading TO this node</summary>'
+        f'{_inbound_sources_html(G, inbound_sources)}'
+        f'</details>'
+    )
+    outbound_path_content += (
+        f'<details class="more-section">'
+        f'<summary>→ Outbound Object Control ({direct_count} direct · {indirect_count} via group)'
+        f' — objects this node has privileges over</summary>'
+        f'{_object_control_out_html(G, outbound_control)}'
+        f'</details>'
+    )
+    outbound_path_content += (
+        f'<details class="more-section">'
+        f'<summary>← Inbound Object Control ({len(inbound_control)} principal(s))'
+        f' — principals with direct privileges over this node</summary>'
+        f'{_object_control_in_html(G, inbound_control)}'
+        f'</details>'
+    )
 
     body_parts.append(
         f'<div class="report-section">'
         f'<h2>{outbound_path_label}</h2>'
         f'<p class="section-lead">Full attack chains from this node.</p>'
         f'{outbound_path_content}'
-        f'</div>'
-    )
-
-    # ── Inbound attackers (full paths) ────────────────────────────────────────
-    inbound_count = len(inbound_sources)
-    body_parts.append(
-        f'<div class="report-section">'
-        f'<h2>← Inbound Attackers '
-        f'<span style="font-weight:400;color:var(--muted);font-size:.82rem">'
-        f'{inbound_count} principal(s) have a path here</span></h2>'
-        f'<p class="section-lead">Principals with a full attack path leading to '
-        f'<code>{node_name}</code>.</p>'
-        f'{_inbound_sources_html(G, inbound_sources)}'
         f'</div>'
     )
 
@@ -1676,3 +1671,85 @@ def render_html_multi(
                       '<a href="https://github.com/dikabraxis/pathdog">pathdog</a></footer>')
     body_parts.append('</body></html>')
     return "\n".join(body_parts)
+
+
+def _html_body_only(html: str) -> str:
+    """Strip HTML head and footer, return just the body content."""
+    start = html.index("<body>") + len("<body>\n")
+    end = html.rindex("<footer>")
+    return html[start:end].rstrip()
+
+
+def render_html_combined(
+    results: list[tuple[str, list]],
+    G: "nx.DiGraph",
+    target: str,
+    node_data: dict,
+    stats: dict | None = None,
+    intermediates: dict | None = None,
+    quickwins=None,
+    pivots: list[dict] | None = None,
+) -> str:
+    """Single HTML combining -u (attack paths) and --node (visibility) sections."""
+    node_id = node_data["node_id"]
+    node_name = _escape(_display_name(G, node_id))
+
+    attack_html = render_html_multi(
+        results, G, target, stats, intermediates, quickwins, pivots,
+    )
+    node_html = render_html_node_visibility(
+        G, node_id, node_data["target"],
+        node_data["outbound_paths"], node_data["outbound_intermediate"],
+        node_data["inbound_sources"], node_data.get("stats"),
+        node_data["outbound_control"], node_data["inbound_control"],
+    )
+
+    attack_body = _html_body_only(attack_html)
+    node_body = _html_body_only(node_html)
+
+    head = _HTML_HEAD.replace("{{TITLE_SUFFIX}}", f"Combined — {_display_name(G, node_id)}")
+
+    attack_banner = (
+        '<div style="border-left:4px solid var(--success);background:var(--success-soft);'
+        'padding:.75rem 1.25rem;border-radius:8px;margin-bottom:1.5rem;'
+        'display:flex;align-items:center;gap:.75rem;">'
+        '<span style="font-size:.8rem;letter-spacing:.1em;text-transform:uppercase;'
+        'font-weight:700;color:var(--success);">⚔ Attack Paths</span>'
+        '<span style="font-size:.75rem;color:var(--muted);">— -u</span>'
+        '</div>'
+    )
+
+    divider = (
+        '<div style="margin:2.5rem 0 2rem;border-top:2px dashed var(--border);'
+        'position:relative;text-align:center;">'
+        '<span style="display:inline-block;position:relative;top:-.75rem;'
+        'background:var(--bg);padding:0 1rem;font-size:.7rem;color:var(--muted);'
+        'letter-spacing:.1em;text-transform:uppercase;">─── node visibility ───</span>'
+        '</div>'
+    )
+
+    node_banner = (
+        f'<div style="border-left:4px solid var(--purple);background:var(--purple-soft);'
+        f'padding:.75rem 1.25rem;border-radius:8px;margin-bottom:1.5rem;'
+        f'display:flex;align-items:center;gap:.75rem;">'
+        f'<span style="font-size:.8rem;letter-spacing:.1em;text-transform:uppercase;'
+        f'font-weight:700;color:var(--purple);">🔍 Node Visibility</span>'
+        f'<span style="font-size:.75rem;color:var(--muted);">— --node <code '
+        f'style="background:var(--purple-soft);color:var(--purple);padding:.1rem .3rem;'
+        f'border-radius:3px;">{node_name}</code></span>'
+        f'</div>'
+    )
+
+    footer = ('<footer>Generated by '
+              '<a href="https://github.com/dikabraxis/pathdog">pathdog</a></footer>')
+
+    return "\n".join([
+        head,
+        attack_banner,
+        attack_body,
+        divider,
+        node_banner,
+        node_body,
+        footer,
+        '</body></html>',
+    ])
