@@ -72,18 +72,26 @@ def _next_actor(
     if rel_type == "AllExtendedRights" and dst_kind in user_kinds:
         return dst_name
     if rel_type in ("ReadLAPSPassword", "SyncLAPSPassword"):
-        return f"local Administrator on {dst_name}"
+        # Local admin password → on-host SYSTEM → AD auth uses the machine account.
+        if dst_kind == "computers":
+            return _computer_identity(dst_name)
+        return current
     if rel_type == "HasSession":
         # In CE, HasSession goes user→computer, so dst is the host you can log into;
         # the actor stays the user (no identity change).
         return current
     if rel_type in ("AdminTo", "SQLAdmin"):
         # AdminTo via psexec → SYSTEM; SQLAdmin → xp_cmdshell → SYSTEM.
-        return f"SYSTEM on {dst_name}"
+        # SYSTEM on a domain-joined host = machine account for AD auth.
+        if dst_kind == "computers":
+            return _computer_identity(dst_name)
+        return current
     if rel_type in ("CanPSRemote", "CanRDP", "ExecuteDCOM"):
-        # Code execution but inheriting the actor's user context (not privileged).
-        act = _parse(current)
-        return f"{act['short']} (interactive on {dst_name})"
+        # Interactive session keeps the actor's user context. Onward AD steps
+        # still run as the original actor unless the operator escalates to
+        # SYSTEM locally (then the machine account would be used — out of scope
+        # for the synthesized identity here).
+        return current
     return current  # no identity change
 
 
