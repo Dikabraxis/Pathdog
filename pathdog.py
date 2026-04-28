@@ -34,6 +34,8 @@ examples:
   pathdog -z dump1.zip dump2.zip -u john@corp.local svc_backup@corp.local
   pathdog -z dump1.zip dump2.zip -u owned_users.txt -k 5 -f html -v
   pathdog -z corp.zip --list users
+  pathdog -z corp.zip --node svc_backup@corp.local
+  pathdog -z corp.zip -u john.doe@corp.local --node svc_backup@corp.local -f html
         """,
     )
     p.add_argument("-z", "--zip", required=True, metavar="FILE", nargs="+",

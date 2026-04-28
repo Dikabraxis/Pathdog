@@ -29,6 +29,7 @@ python pathdog.py -z <dump.zip> -u <user> [options]
 | `-f md \| html \| both` | Report format (default `both`). |
 | `-l KIND` | List nodes and exit. `KIND` = `users`, `computers`, `groups`, `domains`, `gpos`, `ous`, `all`. |
 | `-v` | Show graph statistics. |
+| `--node NODE` | 360° visibility on a node, what it can reach (outbound) and who can reach it (inbound). No `-u` required. Combines with `-u` into a single HTML. |
 | `--no-fallback` | Disable intermediate-target suggestions. |
 | `--no-quickwins` | Disable the domain-wide quick-wins scan. |
 | `--no-pivots` | Disable pivot-candidate scan. |
@@ -53,6 +54,12 @@ python pathdog.py -z corp.zip -u alice@corp.local -t DC01.corp.local
 # Just inspect the dump without running pathfinding
 python pathdog.py -z corp.zip --list users
 python pathdog.py -z corp.zip --list all
+
+# 360° visibility on a node — what it can reach and who can reach it
+python pathdog.py -z corp.zip --node svc_backup@corp.local
+
+# Combine -u and --node, single HTML with both sections
+python pathdog.py -z corp.zip -u john.doe@corp.local --node svc_backup@corp.local -f html
 ```
 
 ## What you get
@@ -73,6 +80,27 @@ HTML report. The HTML report shows:
   deployed hosts, ADCS templates, password-not-required accounts, DCs.
 - **Identity tracking**, commands at each hop use the identity you have
   *right now*, not the node label in the graph.
+
+### Node visibility (`--node`)
+
+Use `--node` to get a 360° picture of any node without targeting Domain
+Admins. The HTML report contains:
+
+- **Attack paths** — outbound chains from this node to DA (or `-t TARGET`),
+  with the same per-hop command breakdown as `-u`.
+- **Other reachable high-value targets** (collapsible) — interesting
+  intermediate nodes this node can reach, useful as pivot steps even when
+  no direct DA path exists.
+- **Inbound attackers** (collapsible) — principals with a full attack path
+  *leading to* this node, ranked by how exploitable they are.
+- **Outbound object control** (collapsible) — every object this node has
+  privileges over, directly or through group membership.
+- **Inbound object control** (collapsible) — principals with direct
+  privileges over this node.
+
+When you pass both `-u` and `--node`, Pathdog produces a single combined
+HTML with the `-u` section on top (green banner) and the `--node` section
+below (purple banner), separated by a clear divider.
 
 Example console output (best path + summary; full breakdown lives in the HTML report):
 
