@@ -10,12 +10,14 @@ from pathdog.loader import load_zip
 from pathdog.graph import build_graph, resolve_target, prune_to_target, graph_stats
 from pathdog.pathfinder import (
     find_paths, suggest_similar_nodes, find_intermediate_targets,
-    find_pivot_candidates,
+    find_pivot_candidates, find_inbound_sources,
 )
 from pathdog.quickwins import collect_all as collect_quickwins
 from pathdog.report import (
     render_markdown_multi, render_html_multi, print_paths_console,
     print_intermediate_targets, print_quickwins, print_pivot_candidates,
+    print_node_visibility_console,
+    render_html_node_visibility, render_markdown_node_visibility,
 )
 
 
@@ -60,6 +62,9 @@ examples:
                    help="Max intermediate targets per user (default: 10)")
     p.add_argument("--pivots-top", type=int, default=15, metavar="N",
                    help="Max pivot candidates to surface (default: 15)")
+    p.add_argument("--node", metavar="NODE", default=None,
+                   help="Show outbound (what this node can reach) and inbound "
+                        "(who can reach this node) path visibility — no -u required")
     return p
 
 
@@ -145,6 +150,94 @@ def _do_list(G, kind: str) -> None:
     print(f"\n{count} node(s) listed.")
 
 
+def _do_node_visibility(G, args) -> int:
+    """Handle --node mode: show outbound and inbound paths for a given node."""
+    node_id, exact = _resolve_source(G, args.node)
+    if not node_id:
+        print(f"[!] Node '{args.node}' not found in graph.", file=sys.stderr)
+        suggestions = suggest_similar_nodes(G, args.node, top_n=3)
+        if suggestions:
+            print("    Did you mean one of:", file=sys.stderr)
+            for s in suggestions:
+                print(f"      - {s}", file=sys.stderr)
+        return 1
+    if not exact:
+        print(f"[~] Fuzzy match for '{args.node}' → '{node_id}'")
+    print(f"[*] Node visibility for: {node_id}")
+
+    # Resolve outbound target (DA or custom); graceful if missing
+    target = resolve_target(G, args.target)
+    if args.target and not target:
+        print(f"[!] Target '{args.target}' not found — outbound will show intermediate targets.",
+              file=sys.stderr)
+    elif target:
+        print(f"[*] Outbound target: {target}")
+
+    outbound_paths: list = []
+    outbound_intermediate: list[dict] = []
+    pruned = None
+
+    if target:
+        pruned = prune_to_target(G, target)
+        if node_id in pruned:
+            print(f"[*] Computing outbound paths ...")
+            try:
+                outbound_paths = find_paths(pruned, node_id, target, k=args.paths)
+            except ValueError:
+                pass
+        if not outbound_paths:
+            print(f"[*] No direct path to target — computing reachable high-value targets ...")
+            outbound_intermediate = find_intermediate_targets(
+                G, node_id, excluded={target}, top_n=args.fallback_top,
+            )
+    else:
+        outbound_intermediate = find_intermediate_targets(
+            G, node_id, excluded=set(), top_n=args.fallback_top,
+        )
+
+    print(f"[*] Computing inbound paths ...")
+    inbound_sources = find_inbound_sources(G, node_id, top_n=10)
+    if inbound_sources:
+        print(f"[*] Inbound: {len(inbound_sources)} principal(s) with a path to this node")
+
+    print_node_visibility_console(
+        G, node_id, target, outbound_paths, outbound_intermediate, inbound_sources,
+    )
+
+    stats = None
+    if args.verbose and pruned is not None:
+        stats = graph_stats(G, pruned)
+
+    written: list[str] = []
+    base = args.output
+    extensions = [e for e in (".md", ".html") if args.fmt in (e[1:], "both")]
+    if any(os.path.exists(f"{base}{ext}") for ext in extensions):
+        base = f"{base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    if args.fmt in ("md", "both"):
+        md_path = f"{base}.md"
+        with open(md_path, "w", encoding="utf-8") as fh:
+            fh.write(render_markdown_node_visibility(
+                G, node_id, target, outbound_paths, outbound_intermediate,
+                inbound_sources, stats,
+            ))
+        written.append(md_path)
+
+    if args.fmt in ("html", "both"):
+        html_path = f"{base}.html"
+        with open(html_path, "w", encoding="utf-8") as fh:
+            fh.write(render_html_node_visibility(
+                G, node_id, target, outbound_paths, outbound_intermediate,
+                inbound_sources, stats,
+            ))
+        written.append(html_path)
+
+    if written:
+        print(f"\n[+] Report(s) written: {', '.join(written)}")
+
+    return 0
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -164,9 +257,13 @@ def main() -> int:
         _do_list(G, args.list_kind)
         return 0
 
+    # ── --node mode: outbound + inbound visibility (no -u required) ───────────
+    if args.node:
+        return _do_node_visibility(G, args)
+
     # ── Validate -u is provided for path-finding ──────────────────────────────
     if not args.users:
-        parser.error("argument -u/--user is required unless --list is used")
+        parser.error("argument -u/--user is required unless --list or --node is used")
 
     # ── Expand user list ──────────────────────────────────────────────────────
     users, rc = _expand_users(args.users)

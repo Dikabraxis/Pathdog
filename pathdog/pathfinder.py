@@ -296,6 +296,76 @@ def find_pivot_candidates(
     return out[:top_n]
 
 
+def find_inbound_sources(
+    G: nx.DiGraph,
+    target_node: str,
+    top_n: int = 10,
+) -> list[dict]:
+    """Find principals that have a path leading TO *target_node* (inbound).
+
+    Reverses the graph to discover all ancestors, scores them by how
+    interesting they are as potential attackers, and returns the top N
+    with their attack path.
+
+    Returns [{"node", "score", "path"}, ...] sorted by score desc.
+    """
+    if target_node not in G:
+        return []
+    R = G.reverse(copy=False)
+    try:
+        ancestors = nx.descendants(R, target_node)
+    except nx.NetworkXError:
+        return []
+    if not ancestors:
+        return []
+
+    scored: list[tuple[int, str]] = []
+    for nid in ancestors:
+        kind = G.nodes[nid].get("kind", "")
+        if kind not in ("users", "computers", "groups"):
+            continue
+        p = G.nodes[nid].get("props", {})
+        score = 0
+        if kind == "users":
+            score += 20
+            if p.get("dontreqpreauth"):
+                score += 15
+            if p.get("hasspn"):
+                score += 10
+            if p.get("passwordnotreqd"):
+                score += 10
+        elif kind == "computers":
+            score += 10
+            if p.get("unconstraineddelegation"):
+                score += 15
+        elif kind == "groups":
+            score += 5
+        if p.get("admincount"):
+            score += 5
+        if p.get("highvalue") or p.get("HighValue"):
+            score += 8
+        scored.append((score, nid))
+
+    scored.sort(key=lambda x: -x[0])
+
+    out: list[dict] = []
+    for base_score, nid in scored[:top_n * 3]:
+        try:
+            path_nodes = nx.dijkstra_path(G, nid, target_node, weight="weight")
+            pr = _path_to_result(G, path_nodes)
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            pr = None
+        if pr is None:
+            continue
+        hop_bonus = max(0, 10 - pr.hops * 2)
+        out.append({"node": nid, "score": base_score + hop_bonus, "path": pr})
+        if len(out) >= top_n:
+            break
+
+    out.sort(key=lambda x: -x["score"])
+    return out
+
+
 def suggest_similar_nodes(G: nx.DiGraph, query: str, top_n: int = 3) -> list[str]:
     """Return top_n node IDs most similar to *query*.
 

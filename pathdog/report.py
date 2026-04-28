@@ -1177,6 +1177,288 @@ def render_html(
     return "\n".join(body_parts)
 
 
+def print_node_visibility_console(
+    G: "nx.DiGraph",
+    node: str,
+    target: str | None,
+    outbound_paths: list,
+    outbound_intermediate: list[dict],
+    inbound_sources: list[dict],
+) -> None:
+    """Print outbound/inbound path visibility for *node* to the terminal."""
+    name = _display_name(G, node)
+    kind = G.nodes[node].get("kind", "?") if node in G else "?"
+    flags = _node_flags(G, node)
+    flags_str = f"  [{', '.join(flags)}]" if flags else ""
+
+    print(f"\n  {_bold('Node:')} {_cyan(name)} {_dim(f'({kind}){flags_str}')}")
+    print(f"  {'─' * 55}")
+
+    # ── Outbound ──────────────────────────────────────────────────────────────
+    tgt_label = _display_name(G, target) if target else "high-value targets"
+    print(f"\n  {_bold(_yellow('→ OUTBOUND'))}  what {_cyan(name)} can attack")
+
+    if outbound_paths:
+        best = outbound_paths[0]
+        dcsync_tag = _magenta(" [DCSync]") if _path_yields_dcsync(G, best) else ""
+        print(f"    {_green('✓')} Reaches {_magenta(tgt_label)}: "
+              f"{_dim(f'{best.hops} hops, weight {best.total_weight}')}{dcsync_tag}")
+        print()
+        src_label = _display_name(G, best.nodes[0])
+        print(f"      {_cyan(src_label)}")
+        for edge in best.edges:
+            rel = _yellow(f"[{edge['relation']}]")
+            dst = _display_name(G, edge["dst"])
+            dst_styled = _magenta(dst) if edge["dst"] == target else dst
+            print(f"        {_dim('└─')}{rel}{_dim('──►')} {dst_styled}")
+        if len(outbound_paths) > 1:
+            print(f"\n    {_dim(f'  +{len(outbound_paths) - 1} more path(s)  →  see report')}")
+    elif outbound_intermediate:
+        print(f"    {_yellow('~')} No path to DA — reachable high-value targets:")
+        for s in outbound_intermediate[:5]:
+            nid = s["node"]
+            path = s["path"]
+            hops = path.hops if path else "?"
+            tname = _display_name(G, nid)
+            print(f"      {_yellow('•')} {tname} {_dim(f'({hops} hops)')}")
+        if len(outbound_intermediate) > 5:
+            print(f"      {_dim(f'+{len(outbound_intermediate) - 5} more  →  see report')}")
+    else:
+        print(f"    {_red('✗')} No paths to high-value targets found.")
+
+    # ── Inbound ───────────────────────────────────────────────────────────────
+    print(f"\n  {_bold(_yellow('← INBOUND'))}  who can attack {_cyan(name)}")
+
+    if inbound_sources:
+        print(f"    {_red('!')} {len(inbound_sources)} principal(s) have a path to this node:")
+        for s in inbound_sources[:5]:
+            nid = s["node"]
+            path = s["path"]
+            hops = path.hops if path else "?"
+            src_name = _display_name(G, nid)
+            kind_s = G.nodes[nid].get("kind", "?") if nid in G else "?"
+            flags_s = _node_flags(G, nid)
+            flags_str_s = f" [{', '.join(flags_s[:2])}]" if flags_s else ""
+            print(f"      {_yellow('•')} {_cyan(src_name)} {_dim(f'({kind_s}, {hops} hops)')}{_dim(flags_str_s)}")
+        if len(inbound_sources) > 5:
+            print(f"      {_dim(f'+{len(inbound_sources) - 5} more  →  see report')}")
+    else:
+        print(f"    {_green('✓')} No paths found from other principals.")
+    print()
+
+
+def _inbound_sources_html(G: "nx.DiGraph", sources: list[dict]) -> str:
+    """Render inbound source cards (who can reach the target node)."""
+    if not sources:
+        return '<div class="empty-block">No paths found from other principals.</div>'
+    cards = []
+    for i, s in enumerate(sources, 1):
+        nid = s["node"]
+        path = s["path"]
+        name = _escape(_display_name(G, nid))
+        kind = G.nodes[nid].get("kind", "?")
+        hops = path.hops if path else "?"
+        chain = ""
+        if path:
+            lines = [_escape(_display_name(G, path.nodes[0]))]
+            for edge in path.edges:
+                rel = _escape(edge["relation"])
+                dst = _escape(_display_name(G, edge["dst"]))
+                lines.append(f"  └─[{rel}]──► {dst}")
+            chain = (
+                f'<div class="pivot-chain-label">Path to target:</div>'
+                f'<pre class="chain-ascii">{chr(10).join(lines)}</pre>'
+            )
+        cards.append(
+            f'<div class="pivot-card">'
+            f'<div class="pivot-head">'
+            f'<span class="pivot-rank">#{i}</span>'
+            f'<span class="pivot-name">{_kind_icon(kind)} {name}</span>'
+            f'<span class="pivot-stat">{hops} hops</span>'
+            f'<span class="pivot-stat">score {s["score"]}</span>'
+            f'{_flag_pills_html(G, nid)}'
+            f'</div>'
+            f'<div class="pivot-body">{chain}</div>'
+            f'</div>'
+        )
+    return "".join(cards)
+
+
+def render_html_node_visibility(
+    G: "nx.DiGraph",
+    node: str,
+    target: str | None,
+    outbound_paths: list,
+    outbound_intermediate: list[dict],
+    inbound_sources: list[dict],
+    stats: dict | None = None,
+) -> str:
+    """Render a standalone HTML report for outbound/inbound node visibility."""
+    node_name = _escape(_display_name(G, node))
+    flags_html = _flag_pills_html(G, node)
+    tgt_display = _escape(_display_name(G, target)) if target else "—"
+
+    head = _HTML_HEAD.replace("{{TITLE_SUFFIX}}", f"Node Visibility: {_display_name(G, node)}")
+    body_parts = [
+        head,
+        f'<div class="title">🐶 Pathdog &nbsp;·&nbsp; '
+        f'<span style="color:var(--muted);font-size:.85rem">node visibility</span>'
+        f' &nbsp;·&nbsp; <code>{node_name}</code> {flags_html}</div>',
+    ]
+
+    # ── Outbound ─────────────────────────────────────────────────────────────
+    outbound_label = (
+        f"→ Outbound — paths to {tgt_display}"
+        if target else "→ Outbound — reachable targets"
+    )
+    if outbound_paths:
+        outbound_content = _path_card_html(outbound_paths[0], G, 1, is_best=True)
+        if len(outbound_paths) > 1:
+            extra = "".join(
+                _path_card_html(p, G, i, is_best=False)
+                for i, p in enumerate(outbound_paths[1:], 2)
+            )
+            outbound_content += (
+                f'<details class="more-section">'
+                f'<summary>More paths ({len(outbound_paths) - 1})</summary>'
+                f'{extra}</details>'
+            )
+    elif outbound_intermediate:
+        outbound_content = _intermediate_html(G, node, outbound_intermediate)
+    else:
+        outbound_content = '<div class="empty-block">No outbound paths to high-value targets.</div>'
+
+    body_parts.append(
+        f'<div class="report-section">'
+        f'<h2>{outbound_label}</h2>'
+        f'<p class="section-lead">What this node can reach and attack.</p>'
+        f'{outbound_content}'
+        f'</div>'
+    )
+
+    # ── Inbound ───────────────────────────────────────────────────────────────
+    inbound_count = len(inbound_sources)
+    inbound_label = (
+        f"← Inbound — {inbound_count} principal(s) can reach this node"
+        if inbound_sources else "← Inbound — no paths found"
+    )
+    body_parts.append(
+        f'<div class="report-section">'
+        f'<h2>{inbound_label}</h2>'
+        f'<p class="section-lead">Principals with an attack path leading to '
+        f'<code>{node_name}</code>.</p>'
+        f'{_inbound_sources_html(G, inbound_sources)}'
+        f'</div>'
+    )
+
+    if stats:
+        body_parts.append(
+            f'<details class="more-section">'
+            f'<summary>Graph stats</summary>'
+            f'{_stats_html_block(stats)}</details>'
+        )
+
+    body_parts.append('<footer>Generated by '
+                      '<a href="https://github.com/dikabraxis/pathdog">pathdog</a></footer>')
+    body_parts.append('</body></html>')
+    return "\n".join(body_parts)
+
+
+def render_markdown_node_visibility(
+    G: "nx.DiGraph",
+    node: str,
+    target: str | None,
+    outbound_paths: list,
+    outbound_intermediate: list[dict],
+    inbound_sources: list[dict],
+    stats: dict | None = None,
+) -> str:
+    """Render a Markdown report for outbound/inbound node visibility."""
+    node_label = _display_name(G, node)
+    tgt_label = _display_name(G, target) if target else "high-value targets"
+    flags = _node_flags(G, node)
+
+    lines: list[str] = []
+    lines.append(f"# Pathdog — Node Visibility: `{node_label}`\n")
+    if flags:
+        lines.append(f"**Flags:** {', '.join(flags)}\n")
+    if stats:
+        lines.extend(_stats_md_lines(stats))
+
+    # Outbound
+    lines.append(f"## → Outbound — paths to `{tgt_label}`\n")
+    if outbound_paths:
+        for i, path in enumerate(outbound_paths, 1):
+            lines.append(f"### Path {i} — Weight: {path.total_weight} | Hops: {path.hops}\n")
+            lines.append("```")
+            first_flags = _node_flags(G, path.nodes[0])
+            first_str = _display_name(G, path.nodes[0])
+            if first_flags:
+                first_str += f"  ⚑ {', '.join(first_flags)}"
+            lines.append(first_str)
+            for edge in path.edges:
+                rel = edge["relation"]
+                dst_name = _display_name(G, edge["dst"])
+                dst_flags = _node_flags(G, edge["dst"])
+                tail = f"  ⚑ {', '.join(dst_flags)}" if dst_flags else ""
+                arrow = f"  └─[{rel}]"
+                pad = max(1, 42 - len(arrow))
+                lines.append(f"{arrow}{'─' * pad}► {dst_name}{tail}")
+            lines.append("```\n")
+            if _path_yields_dcsync(G, path):
+                lines.append("> ✦ **DCSync acquired**\n")
+            actor = _display_name(G, path.nodes[0])
+            for j, edge in enumerate(path.edges, 1):
+                if edge["relation"] in ("MemberOf", "Contains"):
+                    continue
+                cmd, next_actor = _edge_commands(G, edge, actor)
+                src_l = _display_name(G, edge["src"])
+                dst_l = _display_name(G, edge["dst"])
+                lines.append(f"**Hop {j} — [{edge['relation']}]** `{src_l}` → `{dst_l}`\n")
+                lines.append(f"> *Operating as: `{actor}`*  ")
+                lines.append(f"> {cmd.description}\n")
+                if cmd.has_commands:
+                    lines.append("```bash")
+                    lines.extend(cmd.commands)
+                    lines.append("```\n")
+                if next_actor != actor:
+                    lines.append(f"> ✦ **Identity obtained: `{next_actor}`**\n")
+                actor = next_actor
+    elif outbound_intermediate:
+        lines.extend(_intermediate_md(G, node, outbound_intermediate))
+    else:
+        lines.append("> No outbound paths to high-value targets found.\n")
+
+    # Inbound
+    lines.append(f"## ← Inbound — who can reach `{node_label}`\n")
+    if inbound_sources:
+        lines.append(f"{len(inbound_sources)} principal(s) have an attack path to this node.\n")
+        lines.append("| # | Score | Principal | Kind | Hops | Flags |")
+        lines.append("|---|-------|-----------|------|------|-------|")
+        for i, s in enumerate(inbound_sources, 1):
+            nid = s["node"]
+            path = s["path"]
+            flags_s = ", ".join(_node_flags(G, nid)) or "—"
+            hops = path.hops if path else "?"
+            lines.append(
+                f"| {i} | {s['score']} | `{_display_name(G, nid)}` "
+                f"| {G.nodes[nid].get('kind', '?')} | {hops} | {flags_s} |"
+            )
+        lines.append("")
+        for i, s in enumerate(inbound_sources, 1):
+            path = s["path"]
+            if not path:
+                continue
+            chain = " → ".join(f"`{_display_name(G, n)}`" for n in path.nodes)
+            lines.append(f"**{i}.** {chain}\n")
+    else:
+        lines.append("> No paths found from other principals.\n")
+
+    lines.append("---")
+    lines.append("*Generated by [pathdog](https://github.com/dikabraxis/pathdog)*")
+    return "\n".join(lines)
+
+
 def render_html_multi(
     results: list[tuple[str, list]],
     G: "nx.DiGraph",
