@@ -696,7 +696,7 @@ def _pivots_html(G: "nx.DiGraph", pivots: list[dict]) -> str:
                     lines.append(_escape(c))
             cmd_block = f'<pre class="cmd-pre">{"<br>".join(lines)}</pre>'
 
-        # Onward path
+        # Onward path — chain always visible, per-hop commands collapsible
         chain = ""
         if ptd:
             lines = [_escape(_display_name(G, ptd.nodes[0]))]
@@ -704,9 +704,24 @@ def _pivots_html(G: "nx.DiGraph", pivots: list[dict]) -> str:
                 rel = _escape(edge["relation"])
                 dst = _escape(_display_name(G, edge["dst"]))
                 lines.append(f"  └─[{rel}]──► {dst}")
+            onward_steps_html: list[str] = []
+            actor = _display_name(G, ptd.nodes[0])
+            step_num = 0
+            for edge in ptd.edges:
+                if edge["relation"] in ("MemberOf", "Contains"):
+                    html, _ = _step_html(G, edge, actor, step_num)
+                    onward_steps_html.append(html)
+                else:
+                    step_num += 1
+                    html, actor = _step_html(G, edge, actor, step_num)
+                    onward_steps_html.append(html)
             chain = (
                 f'<div class="pivot-chain-label">Onward path to target:</div>'
                 f'<pre class="chain-ascii">{chr(10).join(lines)}</pre>'
+                f'<details class="more-section">'
+                f'<summary>Per-hop commands ({step_num})</summary>'
+                f'<div class="path-steps">{"".join(onward_steps_html)}</div>'
+                f'</details>'
             )
 
         cards.append(
@@ -728,38 +743,86 @@ def _pivots_html(G: "nx.DiGraph", pivots: list[dict]) -> str:
     return "".join(cards)
 
 
+def _collapsible_pivot_card_html(
+    G: "nx.DiGraph",
+    nid: str,
+    path,
+    score: int,
+    index: int,
+    extra_label: str = "",
+) -> str:
+    """Render a node entry as a collapsible card with full path + commands.
+
+    Head (always visible): rank, name, hops, score, flags, [DCSync].
+    Body (toggle): ASCII chain + per-hop steps with commands.
+    """
+    name = _escape(_display_name(G, nid))
+    kind = G.nodes[nid].get("kind", "?")
+    flags_html = _flag_pills_html(G, nid)
+    extra_html = f'<span class="pivot-stat">{_escape(extra_label)}</span>' if extra_label else ""
+
+    if not path:
+        return (
+            f'<div class="pivot-card">'
+            f'<div class="pivot-head">'
+            f'<span class="pivot-rank">#{index}</span>'
+            f'<span class="pivot-name">{_kind_icon(kind)} {name}</span>'
+            f'<span class="pivot-stat">no path</span>'
+            f'<span class="pivot-stat">score {score}</span>'
+            f'{extra_html}{flags_html}'
+            f'</div>'
+            f'</div>'
+        )
+
+    hops = path.hops
+    src_name = _display_name(G, path.nodes[0])
+    chain_lines = [_escape(src_name)]
+    for edge in path.edges:
+        rel = _escape(edge["relation"])
+        dst = _escape(_display_name(G, edge["dst"]))
+        chain_lines.append(f"  └─[{rel}]──► {dst}")
+    chain_ascii = "\n".join(chain_lines)
+
+    steps_html: list[str] = []
+    actor = src_name
+    step_num = 0
+    for edge in path.edges:
+        if edge["relation"] in ("MemberOf", "Contains"):
+            html, _ = _step_html(G, edge, actor, step_num)
+            steps_html.append(html)
+        else:
+            step_num += 1
+            html, actor = _step_html(G, edge, actor, step_num)
+            steps_html.append(html)
+
+    dcsync_pill = ""
+    if _path_yields_dcsync(G, path):
+        dcsync_pill = '<span class="badge-dcsync">DCSync</span>'
+
+    return (
+        f'<details class="pivot-card">'
+        f'<summary class="pivot-head">'
+        f'<span class="pivot-rank">#{index}</span>'
+        f'<span class="pivot-name">{_kind_icon(kind)} {name}</span>'
+        f'<span class="pivot-stat">{hops} hops</span>'
+        f'<span class="pivot-stat">score {score}</span>'
+        f'{extra_html}{dcsync_pill}{flags_html}'
+        f'</summary>'
+        f'<pre class="chain-ascii">{chain_ascii}</pre>'
+        f'<div class="path-steps">{"".join(steps_html)}</div>'
+        f'</details>'
+    )
+
+
 def _intermediate_html(
     G: "nx.DiGraph", source: str, suggestions: list[dict]
 ) -> str:
     if not suggestions:
         return ""
-    cards = []
-    for i, s in enumerate(suggestions, 1):
-        nid = s["node"]
-        path = s["path"]
-        name = _escape(_display_name(G, nid))
-        kind = G.nodes[nid].get("kind", "?")
-        hops = path.hops if path else "?"
-        chain = ""
-        if path:
-            lines = [_escape(_display_name(G, path.nodes[0]))]
-            for edge in path.edges:
-                rel = _escape(edge["relation"])
-                dst = _escape(_display_name(G, edge["dst"]))
-                lines.append(f"  └─[{rel}]──► {dst}")
-            chain = f'<pre class="chain-ascii">{chr(10).join(lines)}</pre>'
-        cards.append(
-            f'<div class="pivot-card">'
-            f'<div class="pivot-head">'
-            f'<span class="pivot-rank">#{i}</span>'
-            f'<span class="pivot-name">{_kind_icon(kind)} {name}</span>'
-            f'<span class="pivot-stat">{hops} hops</span>'
-            f'<span class="pivot-stat">score {s["score"]}</span>'
-            f'{_flag_pills_html(G, nid)}'
-            f'</div>'
-            f'<div class="pivot-body">{chain}</div>'
-            f'</div>'
-        )
+    cards = [
+        _collapsible_pivot_card_html(G, s["node"], s["path"], s["score"], i)
+        for i, s in enumerate(suggestions, 1)
+    ]
     return "".join(cards)
 
 
@@ -989,6 +1052,14 @@ _HTML_HEAD = """\
   /* PIVOTS / INTERMEDIATES */
   .pivot-card { background: var(--card); border: 1px solid var(--border);
                 border-radius: 6px; margin-bottom: .85rem; overflow: hidden; }
+  details.pivot-card > summary { cursor: pointer; list-style: none; user-select: none; }
+  details.pivot-card > summary::-webkit-details-marker { display: none; }
+  details.pivot-card > summary.pivot-head { border-bottom: 1px solid transparent; }
+  details.pivot-card[open] > summary.pivot-head { border-bottom-color: var(--border); }
+  details.pivot-card > summary.pivot-head::before {
+    content: "▶"; color: var(--muted); font-size: .65rem; margin-right: .15rem;
+  }
+  details.pivot-card[open] > summary.pivot-head::before { content: "▼"; }
   .pivot-head { display: flex; align-items: center; gap: .55rem;
                 padding: .55rem .85rem; background: var(--soft);
                 border-bottom: 1px solid var(--border); flex-wrap: wrap; }
@@ -1177,6 +1248,393 @@ def render_html(
     return "\n".join(body_parts)
 
 
+def print_node_visibility_console(
+    G: "nx.DiGraph",
+    node: str,
+    target: str | None,
+    outbound_paths: list,
+    outbound_intermediate: list[dict],
+    inbound_sources: list[dict],
+    outbound_control: list[dict] | None = None,
+    inbound_control: list[dict] | None = None,
+) -> None:
+    """Print a compact node visibility summary — full details are in the HTML report."""
+    name = _display_name(G, node)
+    kind = G.nodes[node].get("kind", "?") if node in G else "?"
+    flags = _node_flags(G, node)
+    flags_str = f"  [{', '.join(flags)}]" if flags else ""
+
+    print(f"\n  {_bold('Node:')} {_cyan(name)} {_dim(f'({kind}){flags_str}')}")
+    print(f"  {'─' * 55}")
+
+    # ── Object control (compact: count + one example) ─────────────────────────
+    outbound_control = outbound_control or []
+    inbound_control = inbound_control or []
+
+    direct = [e for e in outbound_control if e["via_group"] is None]
+    indirect = [e for e in outbound_control if e["via_group"] is not None]
+    if outbound_control:
+        example = outbound_control[0]
+        ex_dst = _display_name(G, example["dst"])
+        ex_via = f" via {example['via_group']}" if example["via_group"] else ""
+        print(f"\n  {_bold(_yellow('→ OUTBOUND CONTROL'))}  "
+              f"{_dim(f'{len(direct)} direct, {len(indirect)} via group(s)')}")
+        print(f"    {_yellow('•')} {_yellow(example['relation'])} on {ex_dst}{_dim(ex_via)}")
+        if len(outbound_control) > 1:
+            print(f"    {_dim(f'  +{len(outbound_control) - 1} more privilege(s)  →  see HTML report')}")
+    else:
+        print(f"\n  {_bold(_yellow('→ OUTBOUND CONTROL'))}  {_dim('no direct privileges found')}")
+
+    if inbound_control:
+        example_in = inbound_control[0]
+        ex_src = _display_name(G, example_in["src"])
+        ex_rel = example_in["relation"]
+        print(f"\n  {_bold(_yellow('← INBOUND CONTROL'))}  "
+              f"{_dim(f'{len(inbound_control)} principal(s) have privileges over this node')}")
+        print(f"    {_yellow('•')} {_cyan(ex_src)} {_dim(f'[{ex_rel}]')}")
+        if len(inbound_control) > 1:
+            print(f"    {_dim(f'  +{len(inbound_control) - 1} more  →  see HTML report')}")
+    else:
+        print(f"\n  {_bold(_yellow('← INBOUND CONTROL'))}  {_dim('no direct incoming privileges found')}")
+
+    # ── Attack paths (outbound) ───────────────────────────────────────────────
+    tgt_label = _display_name(G, target) if target else "high-value targets"
+    print(f"\n  {_bold(_yellow('→ ATTACK PATHS'))}  outbound to {_magenta(tgt_label)}")
+
+    if outbound_paths:
+        best = outbound_paths[0]
+        dcsync_tag = _magenta(" [DCSync]") if _path_yields_dcsync(G, best) else ""
+        print(f"    {_green('✓')} {best.hops} hops, weight {best.total_weight}{dcsync_tag}")
+        extras = []
+        if len(outbound_paths) > 1:
+            extras.append(f"+{len(outbound_paths) - 1} more paths")
+        if extras:
+            print(f"    {_dim('  ' + ' · '.join(extras) + '  →  see HTML report')}")
+    elif outbound_intermediate:
+        print(f"    {_yellow('~')} No path to DA — "
+              f"{len(outbound_intermediate)} reachable high-value target(s)  "
+              f"{_dim('→  see HTML report')}")
+    else:
+        print(f"    {_red('✗')} No paths to high-value targets found.")
+
+    # ── Inbound attackers ─────────────────────────────────────────────────────
+    print(f"\n  {_bold(_yellow('← INBOUND ATTACKERS'))}  who can reach {_cyan(name)}")
+
+    if inbound_sources:
+        top = inbound_sources[0]
+        top_name = _display_name(G, top["node"])
+        top_hops = top["path"].hops if top["path"] else "?"
+        print(f"    {_red('!')} {len(inbound_sources)} principal(s) — "
+              f"closest: {_cyan(top_name)} {_dim(f'({top_hops} hops)')}")
+        print(f"    {_dim(f'  full list  →  see HTML report')}")
+    else:
+        print(f"    {_green('✓')} No paths found from other principals.")
+    print()
+
+
+def _object_control_out_html(G: "nx.DiGraph", entries: list[dict]) -> str:
+    """Render outbound object control table (direct + via group)."""
+    if not entries:
+        return '<div class="empty-block">No outbound privileges found.</div>'
+    rows = []
+    for e in entries:
+        dst_name = _escape(_display_name(G, e["dst"]))
+        dst_kind = G.nodes[e["dst"]].get("kind", "?") if e["dst"] in G else "?"
+        via = f'<span class="step-meta">via {_escape(e["via_group"])}</span>' if e["via_group"] else '<span class="step-meta">direct</span>'
+        rows.append(
+            f'<tr>'
+            f'<td><span class="rel-tag">{_escape(e["relation"])}</span></td>'
+            f'<td>{_kind_icon(dst_kind)} <code>{dst_name}</code>'
+            f'{_flag_pills_html(G, e["dst"])}</td>'
+            f'<td>{via}</td>'
+            f'</tr>'
+        )
+    return (
+        '<table class="data-table">'
+        '<tr><th>Relation</th><th>Target object</th><th>How</th></tr>'
+        + "".join(rows)
+        + '</table>'
+    )
+
+
+def _object_control_in_html(G: "nx.DiGraph", entries: list[dict]) -> str:
+    """Render inbound object control table (who has privileges over this node)."""
+    if not entries:
+        return '<div class="empty-block">No inbound privileges found.</div>'
+    rows = []
+    for e in entries:
+        src_name = _escape(_display_name(G, e["src"]))
+        src_kind = G.nodes[e["src"]].get("kind", "?") if e["src"] in G else "?"
+        rows.append(
+            f'<tr>'
+            f'<td><span class="rel-tag">{_escape(e["relation"])}</span></td>'
+            f'<td>{_kind_icon(src_kind)} <code>{src_name}</code>'
+            f'{_flag_pills_html(G, e["src"])}</td>'
+            f'</tr>'
+        )
+    return (
+        '<table class="data-table">'
+        '<tr><th>Relation</th><th>Principal</th></tr>'
+        + "".join(rows)
+        + '</table>'
+    )
+
+
+def _inbound_sources_html(G: "nx.DiGraph", sources: list[dict]) -> str:
+    """Render inbound source cards (who can reach the target node)."""
+    if not sources:
+        return '<div class="empty-block">No paths found from other principals.</div>'
+    cards = [
+        _collapsible_pivot_card_html(G, s["node"], s["path"], s["score"], i)
+        for i, s in enumerate(sources, 1)
+    ]
+    return "".join(cards)
+
+
+def render_html_node_visibility(
+    G: "nx.DiGraph",
+    node: str,
+    target: str | None,
+    outbound_paths: list,
+    outbound_intermediate: list[dict],
+    inbound_sources: list[dict],
+    stats: dict | None = None,
+    outbound_control: list[dict] | None = None,
+    inbound_control: list[dict] | None = None,
+) -> str:
+    """Render a standalone HTML report for outbound/inbound node visibility."""
+    node_name = _escape(_display_name(G, node))
+    flags_html = _flag_pills_html(G, node)
+    tgt_display = _escape(_display_name(G, target)) if target else "—"
+    outbound_control = outbound_control or []
+    inbound_control = inbound_control or []
+
+    head = _HTML_HEAD.replace("{{TITLE_SUFFIX}}", f"Node Visibility: {_display_name(G, node)}")
+    body_parts = [
+        head,
+        f'<div class="title">🐶 Pathdog &nbsp;·&nbsp; '
+        f'<span style="color:var(--muted);font-size:.85rem">node visibility</span>'
+        f' &nbsp;·&nbsp; <code>{node_name}</code> {flags_html}</div>',
+    ]
+
+    # ── Attack paths (outbound) + collapsible secondary sections ─────────────
+    direct_count = sum(1 for e in outbound_control if e["via_group"] is None)
+    indirect_count = len(outbound_control) - direct_count
+    inbound_count = len(inbound_sources)
+
+    outbound_path_label = (
+        f"→ Attack Paths — outbound to {tgt_display}"
+        if target else "→ Attack Paths — reachable targets"
+    )
+    if outbound_paths:
+        outbound_path_content = _path_card_html(outbound_paths[0], G, 1, is_best=True)
+        if len(outbound_paths) > 1:
+            extra = "".join(
+                _path_card_html(p, G, i, is_best=False)
+                for i, p in enumerate(outbound_paths[1:], 2)
+            )
+            outbound_path_content += (
+                f'<details class="more-section">'
+                f'<summary>More paths ({len(outbound_paths) - 1})</summary>'
+                f'{extra}</details>'
+            )
+        if outbound_intermediate:
+            outbound_path_content += (
+                f'<details class="more-section" open>'
+                f'<summary>Other reachable high-value targets ({len(outbound_intermediate)})'
+                f' — nodes reachable from here, useful as pivot steps even without a direct DA path'
+                f'</summary>'
+                f'{_intermediate_html(G, node, outbound_intermediate)}</details>'
+            )
+    elif outbound_intermediate:
+        outbound_path_content = (
+            f'<details class="more-section" open>'
+            f'<summary>Other reachable high-value targets ({len(outbound_intermediate)})'
+            f' — nodes reachable from here, useful as pivot steps even without a direct DA path'
+            f'</summary>'
+            f'{_intermediate_html(G, node, outbound_intermediate)}</details>'
+        )
+    else:
+        outbound_path_content = (
+            '<div class="empty-block">No outbound paths to high-value targets.</div>'
+        )
+
+    outbound_path_content += (
+        f'<details class="more-section">'
+        f'<summary>← Inbound Attackers ({inbound_count} principal(s))'
+        f' — who has an attack path leading TO this node</summary>'
+        f'{_inbound_sources_html(G, inbound_sources)}'
+        f'</details>'
+    )
+    outbound_path_content += (
+        f'<details class="more-section">'
+        f'<summary>→ Outbound Object Control ({direct_count} direct · {indirect_count} via group)'
+        f' — objects this node has privileges over</summary>'
+        f'{_object_control_out_html(G, outbound_control)}'
+        f'</details>'
+    )
+    outbound_path_content += (
+        f'<details class="more-section">'
+        f'<summary>← Inbound Object Control ({len(inbound_control)} principal(s))'
+        f' — principals with direct privileges over this node</summary>'
+        f'{_object_control_in_html(G, inbound_control)}'
+        f'</details>'
+    )
+
+    body_parts.append(
+        f'<div class="report-section">'
+        f'<h2>{outbound_path_label}</h2>'
+        f'<p class="section-lead">Full attack chains from this node.</p>'
+        f'{outbound_path_content}'
+        f'</div>'
+    )
+
+    if stats:
+        body_parts.append(
+            f'<details class="more-section">'
+            f'<summary>Graph stats</summary>'
+            f'{_stats_html_block(stats)}</details>'
+        )
+
+    body_parts.append('<footer>Generated by '
+                      '<a href="https://github.com/dikabraxis/pathdog">pathdog</a></footer>')
+    body_parts.append('</body></html>')
+    return "\n".join(body_parts)
+
+
+def render_markdown_node_visibility(
+    G: "nx.DiGraph",
+    node: str,
+    target: str | None,
+    outbound_paths: list,
+    outbound_intermediate: list[dict],
+    inbound_sources: list[dict],
+    stats: dict | None = None,
+    outbound_control: list[dict] | None = None,
+    inbound_control: list[dict] | None = None,
+) -> str:
+    """Render a Markdown report for outbound/inbound node visibility."""
+    node_label = _display_name(G, node)
+    tgt_label = _display_name(G, target) if target else "high-value targets"
+    flags = _node_flags(G, node)
+    outbound_control = outbound_control or []
+    inbound_control = inbound_control or []
+
+    lines: list[str] = []
+    lines.append(f"# Pathdog — Node Visibility: `{node_label}`\n")
+    if flags:
+        lines.append(f"**Flags:** {', '.join(flags)}\n")
+    if stats:
+        lines.extend(_stats_md_lines(stats))
+
+    # ── Outbound object control ───────────────────────────────────────────────
+    direct_count = sum(1 for e in outbound_control if e["via_group"] is None)
+    lines.append(f"## → Outbound Object Control ({direct_count} direct, "
+                 f"{len(outbound_control) - direct_count} via group)\n")
+    if outbound_control:
+        lines.append("| Relation | Target | How |")
+        lines.append("|----------|--------|-----|")
+        for e in outbound_control:
+            via = f"via {e['via_group']}" if e["via_group"] else "direct"
+            lines.append(
+                f"| **{e['relation']}** "
+                f"| `{_display_name(G, e['dst'])}` "
+                f"| {via} |"
+            )
+        lines.append("")
+    else:
+        lines.append("> No outbound privileges found.\n")
+
+    # ── Inbound object control ────────────────────────────────────────────────
+    lines.append(f"## ← Inbound Object Control ({len(inbound_control)} principal(s))\n")
+    if inbound_control:
+        lines.append("| Relation | Principal |")
+        lines.append("|----------|-----------|")
+        for e in inbound_control:
+            lines.append(
+                f"| **{e['relation']}** "
+                f"| `{_display_name(G, e['src'])}` |"
+            )
+        lines.append("")
+    else:
+        lines.append("> No inbound privileges found.\n")
+
+    # ── Attack paths (outbound) ───────────────────────────────────────────────
+    lines.append(f"## → Attack Paths — outbound to `{tgt_label}`\n")
+    if outbound_paths:
+        for i, path in enumerate(outbound_paths, 1):
+            lines.append(f"### Path {i} — Weight: {path.total_weight} | Hops: {path.hops}\n")
+            lines.append("```")
+            first_flags = _node_flags(G, path.nodes[0])
+            first_str = _display_name(G, path.nodes[0])
+            if first_flags:
+                first_str += f"  ⚑ {', '.join(first_flags)}"
+            lines.append(first_str)
+            for edge in path.edges:
+                rel = edge["relation"]
+                dst_name = _display_name(G, edge["dst"])
+                dst_flags = _node_flags(G, edge["dst"])
+                tail = f"  ⚑ {', '.join(dst_flags)}" if dst_flags else ""
+                arrow = f"  └─[{rel}]"
+                pad = max(1, 42 - len(arrow))
+                lines.append(f"{arrow}{'─' * pad}► {dst_name}{tail}")
+            lines.append("```\n")
+            if _path_yields_dcsync(G, path):
+                lines.append("> ✦ **DCSync acquired**\n")
+            actor = _display_name(G, path.nodes[0])
+            for j, edge in enumerate(path.edges, 1):
+                if edge["relation"] in ("MemberOf", "Contains"):
+                    continue
+                cmd, next_actor = _edge_commands(G, edge, actor)
+                src_l = _display_name(G, edge["src"])
+                dst_l = _display_name(G, edge["dst"])
+                lines.append(f"**Hop {j} — [{edge['relation']}]** `{src_l}` → `{dst_l}`\n")
+                lines.append(f"> *Operating as: `{actor}`*  ")
+                lines.append(f"> {cmd.description}\n")
+                if cmd.has_commands:
+                    lines.append("```bash")
+                    lines.extend(cmd.commands)
+                    lines.append("```\n")
+                if next_actor != actor:
+                    lines.append(f"> ✦ **Identity obtained: `{next_actor}`**\n")
+                actor = next_actor
+        if outbound_intermediate:
+            lines.extend(_intermediate_md(G, node, outbound_intermediate))
+    elif outbound_intermediate:
+        lines.extend(_intermediate_md(G, node, outbound_intermediate))
+    else:
+        lines.append("> No outbound paths to high-value targets found.\n")
+
+    # ── Inbound attackers (full paths) ────────────────────────────────────────
+    lines.append(f"## ← Inbound Attackers — who can reach `{node_label}`\n")
+    if inbound_sources:
+        lines.append(f"{len(inbound_sources)} principal(s) have an attack path to this node.\n")
+        lines.append("| # | Score | Principal | Kind | Hops | Flags |")
+        lines.append("|---|-------|-----------|------|------|-------|")
+        for i, s in enumerate(inbound_sources, 1):
+            nid = s["node"]
+            path = s["path"]
+            flags_s = ", ".join(_node_flags(G, nid)) or "—"
+            hops = path.hops if path else "?"
+            lines.append(
+                f"| {i} | {s['score']} | `{_display_name(G, nid)}` "
+                f"| {G.nodes[nid].get('kind', '?')} | {hops} | {flags_s} |"
+            )
+        lines.append("")
+        for i, s in enumerate(inbound_sources, 1):
+            path = s["path"]
+            if not path:
+                continue
+            chain = " → ".join(f"`{_display_name(G, n)}`" for n in path.nodes)
+            lines.append(f"**{i}.** {chain}\n")
+    else:
+        lines.append("> No paths found from other principals.\n")
+
+    lines.append("---")
+    lines.append("*Generated by [pathdog](https://github.com/dikabraxis/pathdog)*")
+    return "\n".join(lines)
+
+
 def render_html_multi(
     results: list[tuple[str, list]],
     G: "nx.DiGraph",
@@ -1258,3 +1716,120 @@ def render_html_multi(
                       '<a href="https://github.com/dikabraxis/pathdog">pathdog</a></footer>')
     body_parts.append('</body></html>')
     return "\n".join(body_parts)
+
+
+def _html_body_only(html: str) -> str:
+    """Strip HTML head and footer, return just the body content."""
+    start = html.index("<body>") + len("<body>\n")
+    end = html.rindex("<footer>")
+    return html[start:end].rstrip()
+
+
+def render_html_combined(
+    results: list[tuple[str, list]],
+    G: "nx.DiGraph",
+    target: str,
+    node_data: dict,
+    stats: dict | None = None,
+    intermediates: dict | None = None,
+    quickwins=None,
+    pivots: list[dict] | None = None,
+) -> str:
+    """Single HTML combining -u (attack paths) and --node (visibility) sections.
+
+    When the --node target is also one of the -u sources, the --node section
+    drops the duplicate Attack Paths / HVTs blocks and only keeps the unique
+    parts: inbound attackers and inbound/outbound object control.
+    """
+    node_id = node_data["node_id"]
+    node_name = _escape(_display_name(G, node_id))
+    node_overlaps_u = any(source == node_id for source, _ in results)
+
+    attack_html = render_html_multi(
+        results, G, target, stats, intermediates, quickwins, pivots,
+    )
+    attack_body = _html_body_only(attack_html)
+
+    if node_overlaps_u:
+        outbound_control = node_data["outbound_control"] or []
+        inbound_control = node_data["inbound_control"] or []
+        inbound_sources = node_data["inbound_sources"]
+        direct = sum(1 for e in outbound_control if e["via_group"] is None)
+        indirect = len(outbound_control) - direct
+        node_body = (
+            f'<div class="report-section">'
+            f'<p class="section-lead">Outbound paths and reachable HVTs are already '
+            f'covered in the Attack Paths section above. Below are the inbound '
+            f'attackers and the object-control surface of <code>{node_name}</code>.</p>'
+            f'<details class="more-section" open>'
+            f'<summary>← Inbound Attackers ({len(inbound_sources)} principal(s))'
+            f' — who has an attack path leading TO this node</summary>'
+            f'{_inbound_sources_html(G, inbound_sources)}'
+            f'</details>'
+            f'<details class="more-section">'
+            f'<summary>→ Outbound Object Control ({direct} direct · {indirect} via group)'
+            f' — objects this node has privileges over</summary>'
+            f'{_object_control_out_html(G, outbound_control)}'
+            f'</details>'
+            f'<details class="more-section">'
+            f'<summary>← Inbound Object Control ({len(inbound_control)} principal(s))'
+            f' — principals with direct privileges over this node</summary>'
+            f'{_object_control_in_html(G, inbound_control)}'
+            f'</details>'
+            f'</div>'
+        )
+    else:
+        node_html = render_html_node_visibility(
+            G, node_id, node_data["target"],
+            node_data["outbound_paths"], node_data["outbound_intermediate"],
+            node_data["inbound_sources"], node_data.get("stats"),
+            node_data["outbound_control"], node_data["inbound_control"],
+        )
+        node_body = _html_body_only(node_html)
+
+    head = _HTML_HEAD.replace("{{TITLE_SUFFIX}}", f"Combined — {_display_name(G, node_id)}")
+
+    attack_banner = (
+        '<div style="border-left:4px solid var(--success);background:var(--success-soft);'
+        'padding:.75rem 1.25rem;border-radius:8px;margin-bottom:1.5rem;'
+        'display:flex;align-items:center;gap:.75rem;">'
+        '<span style="font-size:.8rem;letter-spacing:.1em;text-transform:uppercase;'
+        'font-weight:700;color:var(--success);">⚔ Attack Paths</span>'
+        '<span style="font-size:.75rem;color:var(--muted);">— -u</span>'
+        '</div>'
+    )
+
+    divider = (
+        '<div style="margin:2.5rem 0 2rem;border-top:2px dashed var(--border);'
+        'position:relative;text-align:center;">'
+        '<span style="display:inline-block;position:relative;top:-.75rem;'
+        'background:var(--bg);padding:0 1rem;font-size:.7rem;color:var(--muted);'
+        'letter-spacing:.1em;text-transform:uppercase;">─── node visibility ───</span>'
+        '</div>'
+    )
+
+    node_banner = (
+        f'<div style="border-left:4px solid var(--purple);background:var(--purple-soft);'
+        f'padding:.75rem 1.25rem;border-radius:8px;margin-bottom:1.5rem;'
+        f'display:flex;align-items:center;gap:.75rem;">'
+        f'<span style="font-size:.8rem;letter-spacing:.1em;text-transform:uppercase;'
+        f'font-weight:700;color:var(--purple);">🔍 Node Visibility</span>'
+        f'<span style="font-size:.75rem;color:var(--muted);">— --node <code '
+        f'style="background:var(--purple-soft);color:var(--purple);padding:.1rem .3rem;'
+        f'border-radius:3px;">{node_name}</code></span>'
+        f'</div>'
+    )
+
+    footer = ('<footer>Generated by '
+              '<a href="https://github.com/dikabraxis/pathdog">pathdog</a></footer>')
+
+    return "\n".join([
+        head,
+        attack_banner,
+        attack_body,
+        divider,
+        node_banner,
+        node_body,
+        footer,
+        '</body></html>',
+    ])

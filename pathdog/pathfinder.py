@@ -296,6 +296,148 @@ def find_pivot_candidates(
     return out[:top_n]
 
 
+def find_outbound_object_control(
+    G: nx.DiGraph,
+    node_id: str,
+) -> list[dict]:
+    """List objects this node has privileges over (direct + via group membership).
+
+    Returns [{"dst", "relation", "via_group"}, ...] where via_group is the
+    display name of the intermediary group, or None for direct edges.
+    Structural relations (MemberOf, Contains) are excluded.
+    """
+    if node_id not in G:
+        return []
+
+    groups: dict[str, str] = {}
+    frontier = [node_id]
+    visited = {node_id}
+    while frontier:
+        nxt = []
+        for n in frontier:
+            for _, succ in G.out_edges(n):
+                if G[n][succ].get("relation") == "MemberOf" and succ not in visited:
+                    visited.add(succ)
+                    groups[succ] = G.nodes[succ].get("name", succ) if succ in G else succ
+                    nxt.append(succ)
+        frontier = nxt
+
+    seen: set[tuple] = set()
+    results: list[dict] = []
+
+    for _, dst in G.out_edges(node_id):
+        rel = G[node_id][dst].get("relation", "Unknown")
+        if rel in ("MemberOf", "Contains"):
+            continue
+        key = (dst, rel)
+        if key not in seen:
+            seen.add(key)
+            results.append({"dst": dst, "relation": rel, "via_group": None})
+
+    for grp_id, grp_name in groups.items():
+        for _, dst in G.out_edges(grp_id):
+            rel = G[grp_id][dst].get("relation", "Unknown")
+            if rel in ("MemberOf", "Contains"):
+                continue
+            key = (dst, rel)
+            if key not in seen:
+                seen.add(key)
+                results.append({"dst": dst, "relation": rel, "via_group": grp_name})
+
+    results.sort(key=lambda x: (x["via_group"] is not None, x["relation"]))
+    return results
+
+
+def find_inbound_object_control(
+    G: nx.DiGraph,
+    node_id: str,
+) -> list[dict]:
+    """List principals that have direct privileges over this node.
+
+    Returns [{"src", "relation"}, ...] excluding structural relations.
+    """
+    if node_id not in G:
+        return []
+    results = []
+    for src, _ in G.in_edges(node_id):
+        rel = G[src][node_id].get("relation", "Unknown")
+        if rel in ("MemberOf", "Contains"):
+            continue
+        results.append({"src": src, "relation": rel})
+    results.sort(key=lambda x: x["relation"])
+    return results
+
+
+def find_inbound_sources(
+    G: nx.DiGraph,
+    target_node: str,
+    top_n: int = 10,
+) -> list[dict]:
+    """Find principals that have a path leading TO *target_node* (inbound).
+
+    Reverses the graph to discover all ancestors, scores them by how
+    interesting they are as potential attackers, and returns the top N
+    with their attack path.
+
+    Returns [{"node", "score", "path"}, ...] sorted by score desc.
+    """
+    if target_node not in G:
+        return []
+    R = G.reverse(copy=False)
+    try:
+        ancestors = nx.descendants(R, target_node)
+    except nx.NetworkXError:
+        return []
+    if not ancestors:
+        return []
+
+    scored: list[tuple[int, str]] = []
+    for nid in ancestors:
+        kind = G.nodes[nid].get("kind", "")
+        if kind not in ("users", "computers", "groups"):
+            continue
+        p = G.nodes[nid].get("props", {})
+        score = 0
+        if kind == "users":
+            score += 20
+            if p.get("dontreqpreauth"):
+                score += 15
+            if p.get("hasspn"):
+                score += 10
+            if p.get("passwordnotreqd"):
+                score += 10
+        elif kind == "computers":
+            score += 10
+            if p.get("unconstraineddelegation"):
+                score += 15
+        elif kind == "groups":
+            score += 5
+        if p.get("admincount"):
+            score += 5
+        if p.get("highvalue") or p.get("HighValue"):
+            score += 8
+        scored.append((score, nid))
+
+    scored.sort(key=lambda x: -x[0])
+
+    out: list[dict] = []
+    for base_score, nid in scored[:top_n * 3]:
+        try:
+            path_nodes = nx.dijkstra_path(G, nid, target_node, weight="weight")
+            pr = _path_to_result(G, path_nodes)
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            pr = None
+        if pr is None:
+            continue
+        hop_bonus = max(0, 10 - pr.hops * 2)
+        out.append({"node": nid, "score": base_score + hop_bonus, "path": pr})
+        if len(out) >= top_n:
+            break
+
+    out.sort(key=lambda x: -x["score"])
+    return out
+
+
 def suggest_similar_nodes(G: nx.DiGraph, query: str, top_n: int = 3) -> list[str]:
     """Return top_n node IDs most similar to *query*.
 

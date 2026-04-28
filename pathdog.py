@@ -10,12 +10,16 @@ from pathdog.loader import load_zip
 from pathdog.graph import build_graph, resolve_target, prune_to_target, graph_stats
 from pathdog.pathfinder import (
     find_paths, suggest_similar_nodes, find_intermediate_targets,
-    find_pivot_candidates,
+    find_pivot_candidates, find_inbound_sources,
+    find_outbound_object_control, find_inbound_object_control,
 )
 from pathdog.quickwins import collect_all as collect_quickwins
 from pathdog.report import (
     render_markdown_multi, render_html_multi, print_paths_console,
     print_intermediate_targets, print_quickwins, print_pivot_candidates,
+    print_node_visibility_console,
+    render_html_node_visibility, render_markdown_node_visibility,
+    render_html_combined,
 )
 
 
@@ -30,6 +34,8 @@ examples:
   pathdog -z dump1.zip dump2.zip -u john@corp.local svc_backup@corp.local
   pathdog -z dump1.zip dump2.zip -u owned_users.txt -k 5 -f html -v
   pathdog -z corp.zip --list users
+  pathdog -z corp.zip --node svc_backup@corp.local
+  pathdog -z corp.zip -u john.doe@corp.local --node svc_backup@corp.local -f html
         """,
     )
     p.add_argument("-z", "--zip", required=True, metavar="FILE", nargs="+",
@@ -43,8 +49,8 @@ examples:
                    help="Number of paths to find per user (default: 3)")
     p.add_argument("-o", "--output", default="pathdog_report", metavar="BASENAME",
                    help="Output file base name (default: pathdog_report)")
-    p.add_argument("-f", "--format", choices=["md", "html", "both"], default="both",
-                   dest="fmt", help="Output format (default: both)")
+    p.add_argument("-f", "--format", choices=["md", "html", "both"], default="html",
+                   dest="fmt", help="Output format (default: html)")
     p.add_argument("-l", "--list", metavar="KIND", nargs="?", const="all",
                    dest="list_kind",
                    help="List nodes and exit. KIND: users, computers, groups, domains, gpos, ous, all")
@@ -60,6 +66,9 @@ examples:
                    help="Max intermediate targets per user (default: 10)")
     p.add_argument("--pivots-top", type=int, default=15, metavar="N",
                    help="Max pivot candidates to surface (default: 15)")
+    p.add_argument("--node", metavar="NODE", default=None,
+                   help="Show outbound (what this node can reach) and inbound "
+                        "(who can reach this node) path visibility — no -u required")
     return p
 
 
@@ -145,6 +154,124 @@ def _do_list(G, kind: str) -> None:
     print(f"\n{count} node(s) listed.")
 
 
+def _collect_node_data(G, args) -> dict | None:
+    """Collect all node visibility data. Returns a dict or None if node not found."""
+    node_id, exact = _resolve_source(G, args.node)
+    if not node_id:
+        print(f"[!] Node '{args.node}' not found in graph.", file=sys.stderr)
+        suggestions = suggest_similar_nodes(G, args.node, top_n=3)
+        if suggestions:
+            print("    Did you mean one of:", file=sys.stderr)
+            for s in suggestions:
+                print(f"      - {s}", file=sys.stderr)
+        return None
+    if not exact:
+        print(f"[~] Fuzzy match for '{args.node}' → '{node_id}'")
+    print(f"[*] Node visibility for: {node_id}")
+
+    target = resolve_target(G, args.target)
+    if args.target and not target:
+        print(f"[!] Target '{args.target}' not found — outbound will show intermediate targets.",
+              file=sys.stderr)
+    elif target:
+        print(f"[*] Outbound target: {target}")
+
+    outbound_paths: list = []
+    outbound_intermediate: list[dict] = []
+    pruned = None
+
+    if target:
+        pruned = prune_to_target(G, target)
+        if node_id in pruned:
+            print(f"[*] Computing outbound paths ...")
+            try:
+                outbound_paths = find_paths(pruned, node_id, target, k=args.paths)
+            except ValueError:
+                pass
+        print(f"[*] Computing reachable high-value targets ...")
+        outbound_intermediate = find_intermediate_targets(
+            G, node_id, excluded={target}, top_n=args.fallback_top,
+        )
+    else:
+        outbound_intermediate = find_intermediate_targets(
+            G, node_id, excluded=set(), top_n=args.fallback_top,
+        )
+
+    print(f"[*] Computing inbound paths ...")
+    inbound_sources = find_inbound_sources(G, node_id, top_n=10)
+    if inbound_sources:
+        print(f"[*] Inbound: {len(inbound_sources)} principal(s) with a path to this node")
+
+    print(f"[*] Computing object control ...")
+    outbound_control = find_outbound_object_control(G, node_id)
+    inbound_control = find_inbound_object_control(G, node_id)
+    if outbound_control:
+        direct = sum(1 for e in outbound_control if e["via_group"] is None)
+        print(f"[*] Outbound control: {direct} direct, "
+              f"{len(outbound_control) - direct} via group(s)")
+
+    node_stats = None
+    if args.verbose and pruned is not None:
+        node_stats = graph_stats(G, pruned)
+
+    return {
+        "node_id": node_id,
+        "target": target,
+        "outbound_paths": outbound_paths,
+        "outbound_intermediate": outbound_intermediate,
+        "inbound_sources": inbound_sources,
+        "outbound_control": outbound_control,
+        "inbound_control": inbound_control,
+        "stats": node_stats,
+    }
+
+
+def _do_node_visibility(G, args) -> int:
+    """Handle standalone --node mode: collect data, print console, write report."""
+    data = _collect_node_data(G, args)
+    if data is None:
+        return 1
+
+    print_node_visibility_console(
+        G, data["node_id"], data["target"],
+        data["outbound_paths"], data["outbound_intermediate"],
+        data["inbound_sources"], data["outbound_control"], data["inbound_control"],
+    )
+
+    written: list[str] = []
+    base = args.output
+    extensions = [e for e in (".md", ".html") if args.fmt in (e[1:], "both")]
+    if any(os.path.exists(f"{base}{ext}") for ext in extensions):
+        base = f"{base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    if args.fmt in ("md", "both"):
+        md_path = f"{base}.md"
+        with open(md_path, "w", encoding="utf-8") as fh:
+            fh.write(render_markdown_node_visibility(
+                G, data["node_id"], data["target"],
+                data["outbound_paths"], data["outbound_intermediate"],
+                data["inbound_sources"], data["stats"],
+                data["outbound_control"], data["inbound_control"],
+            ))
+        written.append(md_path)
+
+    if args.fmt in ("html", "both"):
+        html_path = f"{base}.html"
+        with open(html_path, "w", encoding="utf-8") as fh:
+            fh.write(render_html_node_visibility(
+                G, data["node_id"], data["target"],
+                data["outbound_paths"], data["outbound_intermediate"],
+                data["inbound_sources"], data["stats"],
+                data["outbound_control"], data["inbound_control"],
+            ))
+        written.append(html_path)
+
+    if written:
+        print(f"\n[+] Report(s) written: {', '.join(written)}")
+
+    return 0
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -164,9 +291,24 @@ def main() -> int:
         _do_list(G, args.list_kind)
         return 0
 
+    # ── --node mode: collect data (standalone) or store for combined report ────
+    node_data = None
+    if args.node:
+        if not args.users:
+            return _do_node_visibility(G, args)
+        node_data = _collect_node_data(G, args)
+        if node_data:
+            print_node_visibility_console(
+                G, node_data["node_id"], node_data["target"],
+                node_data["outbound_paths"], node_data["outbound_intermediate"],
+                node_data["inbound_sources"], node_data["outbound_control"],
+                node_data["inbound_control"],
+            )
+            print()
+
     # ── Validate -u is provided for path-finding ──────────────────────────────
     if not args.users:
-        parser.error("argument -u/--user is required unless --list is used")
+        parser.error("argument -u/--user is required unless --list or --node is used")
 
     # ── Expand user list ──────────────────────────────────────────────────────
     users, rc = _expand_users(args.users)
@@ -249,11 +391,10 @@ def main() -> int:
 
         if paths:
             any_path_found = True
-        else:
-            if not args.no_fallback:
-                intermediates[source] = find_intermediate_targets(
-                    G, source, excluded={target}, top_n=args.fallback_top,
-                )
+        if not args.no_fallback:
+            intermediates[source] = find_intermediate_targets(
+                G, source, excluded={target}, top_n=args.fallback_top,
+            )
         all_results.append((source, paths))
 
     # ── Quick wins (domain-wide, computed once) ───────────────────────────────
@@ -285,7 +426,7 @@ def main() -> int:
             print(f"  Owned user: {src_label}")
             print(f"{'═' * 60}")
         print_paths_console(paths, G, source, target)
-        if not paths and source in intermediates:
+        if source in intermediates:
             print_intermediate_targets(G, source, intermediates[source])
 
     if pivots:
@@ -315,10 +456,16 @@ def main() -> int:
     if args.fmt in ("html", "both"):
         html_path = f"{base}.html"
         with open(html_path, "w", encoding="utf-8") as fh:
-            fh.write(render_html_multi(
-                all_results, G, target, report_stats,
-                intermediates=intermediates, quickwins=quickwins, pivots=pivots,
-            ))
+            if node_data:
+                fh.write(render_html_combined(
+                    all_results, G, target, node_data, report_stats,
+                    intermediates=intermediates, quickwins=quickwins, pivots=pivots,
+                ))
+            else:
+                fh.write(render_html_multi(
+                    all_results, G, target, report_stats,
+                    intermediates=intermediates, quickwins=quickwins, pivots=pivots,
+                ))
         written.append(html_path)
 
     if written:
