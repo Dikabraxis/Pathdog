@@ -1735,22 +1735,57 @@ def render_html_combined(
     quickwins=None,
     pivots: list[dict] | None = None,
 ) -> str:
-    """Single HTML combining -u (attack paths) and --node (visibility) sections."""
+    """Single HTML combining -u (attack paths) and --node (visibility) sections.
+
+    When the --node target is also one of the -u sources, the --node section
+    drops the duplicate Attack Paths / HVTs blocks and only keeps the unique
+    parts: inbound attackers and inbound/outbound object control.
+    """
     node_id = node_data["node_id"]
     node_name = _escape(_display_name(G, node_id))
+    node_overlaps_u = any(source == node_id for source, _ in results)
 
     attack_html = render_html_multi(
         results, G, target, stats, intermediates, quickwins, pivots,
     )
-    node_html = render_html_node_visibility(
-        G, node_id, node_data["target"],
-        node_data["outbound_paths"], node_data["outbound_intermediate"],
-        node_data["inbound_sources"], node_data.get("stats"),
-        node_data["outbound_control"], node_data["inbound_control"],
-    )
-
     attack_body = _html_body_only(attack_html)
-    node_body = _html_body_only(node_html)
+
+    if node_overlaps_u:
+        outbound_control = node_data["outbound_control"] or []
+        inbound_control = node_data["inbound_control"] or []
+        inbound_sources = node_data["inbound_sources"]
+        direct = sum(1 for e in outbound_control if e["via_group"] is None)
+        indirect = len(outbound_control) - direct
+        node_body = (
+            f'<div class="report-section">'
+            f'<p class="section-lead">Outbound paths and reachable HVTs are already '
+            f'covered in the Attack Paths section above. Below are the inbound '
+            f'attackers and the object-control surface of <code>{node_name}</code>.</p>'
+            f'<details class="more-section" open>'
+            f'<summary>← Inbound Attackers ({len(inbound_sources)} principal(s))'
+            f' — who has an attack path leading TO this node</summary>'
+            f'{_inbound_sources_html(G, inbound_sources)}'
+            f'</details>'
+            f'<details class="more-section">'
+            f'<summary>→ Outbound Object Control ({direct} direct · {indirect} via group)'
+            f' — objects this node has privileges over</summary>'
+            f'{_object_control_out_html(G, outbound_control)}'
+            f'</details>'
+            f'<details class="more-section">'
+            f'<summary>← Inbound Object Control ({len(inbound_control)} principal(s))'
+            f' — principals with direct privileges over this node</summary>'
+            f'{_object_control_in_html(G, inbound_control)}'
+            f'</details>'
+            f'</div>'
+        )
+    else:
+        node_html = render_html_node_visibility(
+            G, node_id, node_data["target"],
+            node_data["outbound_paths"], node_data["outbound_intermediate"],
+            node_data["inbound_sources"], node_data.get("stats"),
+            node_data["outbound_control"], node_data["inbound_control"],
+        )
+        node_body = _html_body_only(node_html)
 
     head = _HTML_HEAD.replace("{{TITLE_SUFFIX}}", f"Combined — {_display_name(G, node_id)}")
 
