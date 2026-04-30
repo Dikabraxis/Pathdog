@@ -494,15 +494,123 @@ def _flag_pills_html(G: "nx.DiGraph", nid: str) -> str:
     return "".join(pills)
 
 
-def _kind_icon(kind: str) -> str:
+def _kind_label(kind: str) -> str:
     return {
-        "users": "👤",
-        "computers": "💻",
-        "groups": "👥",
-        "domains": "🌐",
-        "gpos": "📜",
-        "ous": "📁",
-    }.get(kind, "•")
+        "users": "USER",
+        "computers": "COMPUTER",
+        "groups": "GROUP",
+        "domains": "DOMAIN",
+        "gpos": "GPO",
+        "ous": "OU",
+    }.get(kind, "NODE")
+
+
+def _kind_badge(kind: str) -> str:
+    return f'<span class="kind-badge kind-{_escape(kind or "unknown")}">{_kind_label(kind)}</span>'
+
+
+def _status_badge(label: str, kind: str) -> str:
+    return f'<span class="status-badge status-{_escape(kind)}">{_escape(label)}</span>'
+
+
+def _sticky_nav_html(items: list[tuple[str, str]]) -> str:
+    if not items:
+        return ""
+    links = "".join(
+        f'<a href="#{_escape(anchor)}">{_escape(label)}</a>'
+        for label, anchor in items
+    )
+    return f'<nav class="sticky-nav">{links}</nav>'
+
+
+def _format_command_line(command: str) -> str:
+    escaped = _escape(command)
+    out = []
+    i = 0
+    while i < len(escaped):
+        start = escaped.find("&lt;", i)
+        if start == -1:
+            out.append(escaped[i:])
+            break
+        end = escaped.find("&gt;", start)
+        if end == -1:
+            out.append(escaped[i:])
+            break
+        token = escaped[start + 4:end]
+        if not token or not all(c.isalnum() or c in "_-.$" for c in token):
+            out.append(escaped[i:start + 4])
+            i = start + 4
+            continue
+        out.append(escaped[i:start])
+        out.append(f'<span class="placeholder">{escaped[start:end + 4]}</span>')
+        i = end + 4
+    return "".join(out)
+
+
+def _command_block(commands: list[str], *, small: bool = False, title: str | None = None) -> str:
+    if not commands:
+        return ""
+    lines = []
+    for c in commands:
+        if c.startswith("#"):
+            lines.append(f'<span class="cmt">{_format_command_line(c)}</span>')
+        else:
+            lines.append(_format_command_line(c))
+    cls = "cmd-pre small" if small else "cmd-pre"
+    label = _escape(title or f"Commands ({len(commands)})")
+    return (
+        '<div class="cmd-box">'
+        f'<div class="cmd-toolbar"><span>{label}</span>'
+        '<button type="button" class="copy-btn">Copy</button></div>'
+        f'<pre class="{cls}">{"<br>".join(lines)}</pre>'
+        '</div>'
+    )
+
+
+def _action_plan_html(path: "PathResult", G: "nx.DiGraph") -> str:
+    actions = []
+    actor = _display_name(G, path.nodes[0])
+    step_num = 0
+    for edge in path.edges:
+        if edge["relation"] in ("MemberOf", "Contains"):
+            continue
+        step_num += 1
+        cmd, next_actor = _edge_commands(G, edge, actor)
+        dst_name = _display_name(G, edge["dst"])
+        runnable = [c for c in cmd.commands if not c.startswith("#")]
+        identity = ""
+        if next_actor != actor:
+            identity = f'<span class="plan-change">then operate as <code>{_escape(next_actor)}</code></span>'
+        command_html = ""
+        if runnable:
+            plan_commands = runnable
+            title = "Primary commands" if len(plan_commands) > 1 else "Primary command"
+            command_html = _command_block(plan_commands, small=True, title=title)
+        actions.append(
+            '<div class="plan-row">'
+            f'<div class="plan-num">{step_num}</div>'
+            '<div class="plan-main">'
+            f'<div class="plan-title"><span class="rel-tag">{_escape(edge["relation"])}</span> '
+            f'on <code>{_escape(dst_name)}</code></div>'
+            f'<div class="plan-meta">as <code>{_escape(actor)}</code> {identity}</div>'
+            f'{command_html}'
+            '</div></div>'
+        )
+        actor = next_actor
+    if not actions:
+        return ""
+    dcsync = _status_badge("DCSYNC", "dcsync") if _path_yields_dcsync(G, path) else ""
+    return (
+        '<section class="action-plan" id="action-plan">'
+        '<div class="plan-head">'
+        '<div><div class="eyebrow">Action plan</div>'
+        '<h2>Primary exploit sequence</h2></div>'
+        f'<div class="plan-stats"><span>{path.hops} hops</span>'
+        f'<span>weight {path.total_weight}</span>{dcsync}</div>'
+        '</div>'
+        f'<div class="plan-list">{"".join(actions)}</div>'
+        '</section>'
+    )
 
 
 def _verdict_html(
@@ -511,11 +619,13 @@ def _verdict_html(
     target: str,
     paths: list,
     pivots: list[dict] | None,
+    info_only: bool = False,
 ) -> str:
     """One-line verdict at the very top — green/orange/red dot + status."""
     if paths:
         best = paths[0]
         kind = "win"
+        badge = _status_badge("EXPLOITABLE", "exploitable")
         msg = f"Path found — {best.hops} hops, weight {best.total_weight}"
     elif pivots:
         top = pivots[0]
@@ -524,15 +634,22 @@ def _verdict_html(
         vector = top["vectors"][0] if top["vectors"] else "out-of-band"
         hops = ptd.hops if ptd else "?"
         kind = "warn"
+        badge = _status_badge("PIVOT REQUIRED", "pivot")
         msg = (f"No direct path — pivot via <b>{node_name}</b> "
                f"({_escape(vector)}, {hops} hops onward)")
     else:
         kind = "fail"
-        msg = "No actionable path or pivot found"
+        if info_only:
+            badge = _status_badge("INFO ONLY", "info")
+            msg = "No actionable path or pivot found — informational findings are available below"
+        else:
+            badge = _status_badge("NO PATH", "fail")
+            msg = "No actionable path or pivot found"
 
     return (
-        f'<div class="verdict verdict-{kind}">'
+        f'<div class="verdict verdict-{kind}" id="verdict">'
         f'<span class="verdict-dot"></span>'
+        f'{badge}'
         f'<span class="verdict-msg">{msg}</span>'
         f'</div>'
     )
@@ -557,10 +674,10 @@ def _step_html(
             f'<div class="step step-structural">'
             f'<div class="step-num">·</div>'
             f'<div class="step-body">'
-            f'<div class="step-headline">{_kind_icon(src_kind)} '
+            f'<div class="step-headline">{_kind_badge(src_kind)} '
             f'<code>{_escape(src_name)}</code> '
             f'<span class="step-arrow">→</span> '
-            f'{_kind_icon(dst_kind)} <code>{_escape(dst_name)}</code></div>'
+            f'{_kind_badge(dst_kind)} <code>{_escape(dst_name)}</code></div>'
             f'<div class="step-meta">via <span class="rel-tag">{_escape(rel)}</span> '
             f'— {_escape(explain["plain"])}</div>'
             f'</div></div>'
@@ -579,16 +696,10 @@ def _step_html(
 
     cmd_block = ""
     if cmd.has_commands:
-        lines = []
-        for c in cmd.commands:
-            if c.startswith("#"):
-                lines.append(f'<span class="cmt">{_escape(c)}</span>')
-            else:
-                lines.append(_escape(c))
         cmd_block = (
             f'<details class="cmd-details" open>'
             f'<summary>Commands ({len(cmd.commands)})</summary>'
-            f'<pre class="cmd-pre">{"<br>".join(lines)}</pre>'
+            f'{_command_block(cmd.commands)}'
             f'</details>'
         )
 
@@ -609,9 +720,9 @@ def _step_html(
         f'<div class="step-num">{step_num}</div>'
         f'<div class="step-body">'
         f'<div class="step-headline">'
-        f'{_kind_icon(src_kind)} <code>{_escape(src_name)}</code> '
+        f'{_kind_badge(src_kind)} <code>{_escape(src_name)}</code> '
         f'<span class="rel-tag">{_escape(rel)}</span> '
-        f'{_kind_icon(dst_kind)} <code>{_escape(dst_name)}</code>'
+        f'{_kind_badge(dst_kind)} <code>{_escape(dst_name)}</code>'
         f'{_flag_pills_html(G, edge["dst"])}'
         f'</div>'
         f'<div class="step-title">{_escape(explain["title"])}</div>'
@@ -661,15 +772,48 @@ def _path_card_html(
     if _path_yields_dcsync(G, path):
         dcsync_pill = '<span class="badge-dcsync">DCSync</span>'
 
+    exploit_edges = [edge for edge in path.edges if edge["relation"] not in ("MemberOf", "Contains")]
+    exploit_rows = []
+    actor = src_name
+    for n, edge in enumerate(exploit_edges, 1):
+        cmd, next_actor = _edge_commands(G, edge, actor)
+        actor_note = ""
+        if next_actor != actor:
+            actor_note = f'<span class="exploit-actor">operate as <code>{_escape(next_actor)}</code></span>'
+        exploit_rows.append(
+            '<div class="exploit-hop">'
+            f'<span class="exploit-num">{n}</span>'
+            f'<span class="rel-tag">{_escape(edge["relation"])}</span>'
+            f'<code>{_escape(_display_name(G, edge["dst"]))}</code>'
+            f'<span class="exploit-desc">{_escape(cmd.description)}</span>'
+            f'{actor_note}'
+            '</div>'
+        )
+        actor = next_actor
+
+    exploit_html = ""
+    if exploit_rows:
+        exploit_html = (
+            '<div class="exploit-only">'
+            '<div class="eyebrow">Exploit chain</div>'
+            f'{"".join(exploit_rows)}'
+            '</div>'
+        )
+
+    card_id = "best-path" if is_best else f"path-{index}"
     return (
-        f'<div class="path-card{(" best" if is_best else "")}" id="path-{index}">'
+        f'<div class="path-card{(" best" if is_best else "")}" id="{card_id}">'
         f'<div class="path-head">'
         f'<span class="path-badge {badge_cls}">{badge_text}</span>'
         f'<span class="path-stat">{path.hops} hops</span>'
         f'<span class="path-stat">weight {path.total_weight}</span>'
         f'{dcsync_pill}'
         f'</div>'
+        f'{exploit_html}'
+        f'<details class="graph-chain">'
+        f'<summary>Full graph chain ({path.hops} hops)</summary>'
         f'<pre class="chain-ascii">{chain_ascii}</pre>'
+        f'</details>'
         f'<div class="path-steps">{"".join(steps_html)}</div>'
         f'</div>'
     )
@@ -701,13 +845,7 @@ def _pivots_html(G: "nx.DiGraph", pivots: list[dict]) -> str:
         # Commands always visible (the whole point: copy-paste them)
         cmd_block = ""
         if pv["vector_commands"]:
-            lines = []
-            for c in pv["vector_commands"]:
-                if c.startswith("#"):
-                    lines.append(f'<span class="cmt">{_escape(c)}</span>')
-                else:
-                    lines.append(_escape(c))
-            cmd_block = f'<pre class="cmd-pre">{"<br>".join(lines)}</pre>'
+            cmd_block = _command_block(pv["vector_commands"], title="Pivot commands")
 
         # Onward path — chain always visible, per-hop commands collapsible
         chain = ""
@@ -741,7 +879,7 @@ def _pivots_html(G: "nx.DiGraph", pivots: list[dict]) -> str:
             f'<div class="pivot-card">'
             f'<div class="pivot-head">'
             f'<span class="pivot-rank">#{i}</span>'
-            f'<span class="pivot-name">{_kind_icon(kind)} {name}</span>'
+            f'<span class="pivot-name">{_kind_badge(kind)} {name}</span>'
             f'<span class="pivot-stat">{hops} hops onward</span>'
             f'<span class="pivot-stat">score {pv["score"]}</span>'
             f'{_flag_pills_html(G, nid)}'
@@ -779,7 +917,7 @@ def _collapsible_pivot_card_html(
             f'<div class="pivot-card">'
             f'<div class="pivot-head">'
             f'<span class="pivot-rank">#{index}</span>'
-            f'<span class="pivot-name">{_kind_icon(kind)} {name}</span>'
+            f'<span class="pivot-name">{_kind_badge(kind)} {name}</span>'
             f'<span class="pivot-stat">no path</span>'
             f'<span class="pivot-stat">score {score}</span>'
             f'{extra_html}{flags_html}'
@@ -816,7 +954,7 @@ def _collapsible_pivot_card_html(
         f'<details class="pivot-card">'
         f'<summary class="pivot-head">'
         f'<span class="pivot-rank">#{index}</span>'
-        f'<span class="pivot-name">{_kind_icon(kind)} {name}</span>'
+        f'<span class="pivot-name">{_kind_badge(kind)} {name}</span>'
         f'<span class="pivot-stat">{hops} hops</span>'
         f'<span class="pivot-stat">score {score}</span>'
         f'{extra_html}{dcsync_pill}{flags_html}'
@@ -843,41 +981,86 @@ def _quickwins_html(quickwins: dict[str, list["QuickWin"]]) -> str:
     if not quickwins:
         return ""
     blocks = []
-    for cat in sorted(quickwins, key=lambda c: -len(quickwins[c])):
+    categories = sorted(quickwins, key=lambda c: -len(quickwins[c]))
+    tiles = []
+    for cat in categories:
+        items = quickwins[cat]
+        slug = _slug(cat)
+        tiles.append(
+            f'<a class="qw-tile" href="#qw-{slug}">'
+            f'<span class="qw-tile-num">{len(items)}</span>'
+            f'<span class="qw-tile-cat">{_escape(cat)}</span>'
+            f'</a>'
+        )
+
+    for i, cat in enumerate(categories, 1):
         items = quickwins[cat]
         explain = _explain_quickwin(cat) or ""
+        slug = _slug(cat)
 
         item_cards = []
-        for qw in items:
+        for qw in items[:3]:
             cmd_block = ""
             if qw.commands:
-                lines = []
-                for c in qw.commands:
-                    if c.startswith("#"):
-                        lines.append(f'<span class="cmt">{_escape(c)}</span>')
-                    else:
-                        lines.append(_escape(c))
-                cmd_block = f'<pre class="cmd-pre">{"<br>".join(lines)}</pre>'
+                cmd_block = (
+                    '<details class="cmd-details">'
+                    f'<summary>Commands ({len(qw.commands)})</summary>'
+                    f'{_command_block(qw.commands, small=True, title="Commands")}'
+                    '</details>'
+                )
             item_cards.append(
                 f'<div class="qw-item">'
-                f'<div class="qw-item-name">{_kind_icon(qw.node_kind)} '
+                f'<div class="qw-item-name">{_kind_badge(qw.node_kind)} '
                 f'<code>{_escape(qw.node_name)}</code></div>'
                 f'<div class="qw-item-detail">{_escape(qw.detail)}</div>'
                 f'{cmd_block}'
                 f'</div>'
             )
 
+        more_items = []
+        for qw in items[3:]:
+            cmd_block = ""
+            if qw.commands:
+                cmd_block = (
+                    '<details class="cmd-details">'
+                    f'<summary>Commands ({len(qw.commands)})</summary>'
+                    f'{_command_block(qw.commands, small=True, title="Commands")}'
+                    '</details>'
+                )
+            more_items.append(
+                f'<div class="qw-item">'
+                f'<div class="qw-item-name">{_kind_badge(qw.node_kind)} '
+                f'<code>{_escape(qw.node_name)}</code></div>'
+                f'<div class="qw-item-detail">{_escape(qw.detail)}</div>'
+                f'{cmd_block}'
+                f'</div>'
+            )
+        more_html = ""
+        if more_items:
+            more_html = (
+                f'<details class="qw-more">'
+                f'<summary>Show all remaining ({len(more_items)})</summary>'
+                f'<div class="qw-items">{"".join(more_items)}</div>'
+                f'</details>'
+            )
+        open_attr = " open" if i <= 3 else ""
         blocks.append(
-            f'<div class="qw-cat">'
-            f'<div class="qw-cat-head">'
+            f'<details class="qw-cat" id="qw-{slug}"{open_attr}>'
+            f'<summary class="qw-cat-head">'
             f'<span class="qw-cat-title">{_escape(cat)}</span> '
             f'<span class="qw-count-small">{len(items)}</span>'
-            f'</div>'
+            f'</summary>'
             f'<div class="qw-cat-explain">{_escape(explain)}</div>'
             f'<div class="qw-items">{"".join(item_cards)}</div>'
-            f'</div>'
+            f'{more_html}'
+            f'</details>'
         )
-    return "".join(blocks)
+    return (
+        '<div class="quickwin-summary">'
+        f'{"".join(tiles)}'
+        '</div>'
+        + "".join(blocks)
+    )
 
 
 def _slug(s: str) -> str:
@@ -902,11 +1085,47 @@ def _stats_html_block(stats: dict) -> str:
 _HTML_HEAD = """\
 <!DOCTYPE html>
 <html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Pathdog — {{TITLE_SUFFIX}}</title>
-<style>
+	<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Pathdog — {{TITLE_SUFFIX}}</title>
+	<script>
+	document.addEventListener("click", (event) => {
+	  const button = event.target.closest(".copy-btn");
+	  if (!button) return;
+	  const box = button.closest(".cmd-box");
+	  const pre = box ? box.querySelector("pre") : null;
+	  if (!pre) return;
+	  const done = () => {
+	    const original = button.textContent;
+	    button.textContent = "Copied";
+	    window.setTimeout(() => { button.textContent = original; }, 1200);
+	  };
+	  if (navigator.clipboard) {
+	    navigator.clipboard.writeText(pre.innerText).then(done);
+	    return;
+	  }
+	  const range = document.createRange();
+	  range.selectNodeContents(pre);
+	  const selection = window.getSelection();
+	  selection.removeAllRanges();
+	  selection.addRange(range);
+	  document.execCommand("copy");
+	  selection.removeAllRanges();
+	  done();
+	});
+	document.addEventListener("input", (event) => {
+	  const input = event.target.closest(".object-filter");
+	  if (!input) return;
+	  const block = input.closest(".object-control-block");
+	  if (!block) return;
+	  const needle = input.value.trim().toLowerCase();
+	  block.querySelectorAll("tr[data-filter]").forEach((row) => {
+	    row.hidden = needle.length > 0 && !row.dataset.filter.includes(needle);
+	  });
+	});
+	</script>
+	<style>
   :root {
     --bg: #0d1117; --card: #161b22; --border: #30363d;
     --text: #e6edf3; --muted: #8b949e; --soft: #1c2128;
@@ -926,11 +1145,20 @@ _HTML_HEAD = """\
     margin: 0 auto;
   }
   code, pre, .mono { font-family: "SF Mono", Menlo, Consolas, monospace; }
-  .title { color: var(--text); font-size: 1.05rem; margin-bottom: 1rem;
-           padding-bottom: .55rem; border-bottom: 1px solid var(--border); }
-  .title code { background: var(--soft); padding: .1rem .35rem;
-                border-radius: 3px; color: var(--primary); font-size: .85rem; }
-  h2 { font-size: 1rem; color: var(--text); margin: 0 0 .5rem; }
+	  .title { color: var(--text); font-size: 1.05rem; margin-bottom: 1rem;
+	           padding-bottom: .55rem; border-bottom: 1px solid var(--border); }
+	  .title code { background: var(--soft); padding: .1rem .35rem;
+	                border-radius: 3px; color: var(--primary); font-size: .85rem; }
+	  .brand { font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+	  h2 { font-size: 1rem; color: var(--text); margin: 0 0 .5rem; }
+  .sticky-nav { position: sticky; top: 0; z-index: 20; display: flex; gap: .35rem;
+                overflow-x: auto; padding: .45rem 0 .75rem; margin-bottom: .5rem;
+                background: var(--bg); border-bottom: 1px solid var(--border); }
+  .sticky-nav a { flex: 0 0 auto; color: var(--muted); text-decoration: none;
+                  border: 1px solid var(--border); background: var(--card);
+                  border-radius: 999px; padding: .25rem .6rem; font-size: .75rem;
+                  font-weight: 700; }
+  .sticky-nav a:hover { color: var(--primary); border-color: var(--primary); }
   .more-section { background: var(--card); border: 1px solid var(--border);
                   border-radius: 6px; padding: .55rem .85rem; margin-bottom: .65rem; }
   .more-section > summary { cursor: pointer; list-style: none; color: var(--muted);
@@ -949,17 +1177,64 @@ _HTML_HEAD = """\
   .verdict-warn .verdict-dot { background: var(--warn); }
   .verdict-fail .verdict-dot { background: var(--danger); }
   .verdict-msg { font-size: .92rem; }
-  .verdict-msg b { color: var(--primary); }
-  .verdict-msg code { background: var(--soft); padding: .1rem .35rem; border-radius: 3px; }
+	  .verdict-msg b { color: var(--primary); }
+	  .verdict-msg code { background: var(--soft); padding: .1rem .35rem; border-radius: 3px; }
   .badge-dcsync { background: var(--purple-soft); color: var(--purple);
                   border: 1px solid var(--purple); padding: .1rem .45rem;
                   border-radius: 10px; font-size: .68rem; font-weight: 700;
                   letter-spacing: .05em; margin-left: auto; }
 
-  /* SECTION */
+	  /* SECTION */
   .report-section { background: var(--card); border: 1px solid var(--border);
                     border-radius: 10px; padding: 1.25rem 1.5rem; margin-bottom: 1.5rem; }
-  .section-lead { color: var(--muted); margin-bottom: 1rem; font-size: .9rem; }
+	  .section-lead { color: var(--muted); margin-bottom: 1rem; font-size: .9rem; }
+
+	  /* ACTION PLAN */
+	  .action-plan { background: var(--card); border: 1px solid var(--success);
+	                 border-radius: 8px; margin-bottom: 1rem; overflow: hidden; }
+	  .plan-head { display: flex; justify-content: space-between; align-items: flex-start;
+	               gap: 1rem; padding: .85rem 1rem; background: var(--success-soft);
+	               border-bottom: 1px solid var(--border); }
+	  .eyebrow { color: var(--muted); font-size: .68rem; letter-spacing: .12em;
+	             text-transform: uppercase; font-weight: 800; margin-bottom: .1rem; }
+	  .plan-stats { display: flex; align-items: center; gap: .45rem; flex-wrap: wrap;
+	                color: var(--muted); font-size: .78rem; justify-content: flex-end; }
+	  .status-badge { border: 1px solid var(--border); border-radius: 10px;
+	                  padding: .1rem .45rem; font-size: .68rem; font-weight: 800;
+	                  letter-spacing: .06em; }
+	  .status-exploitable { color: var(--success); border-color: var(--success);
+	                        background: var(--success-soft); }
+	  .status-pivot { color: var(--warn); border-color: var(--warn);
+	                  background: var(--warn-soft); }
+	  .status-fail { color: var(--danger); border-color: var(--danger);
+	                 background: var(--danger-soft); }
+	  .status-info { color: var(--primary); border-color: var(--primary);
+	                 background: var(--primary-soft); }
+	  .status-dcsync { color: var(--purple); border-color: var(--purple);
+	                   background: var(--purple-soft); }
+	  .plan-list { display: flex; flex-direction: column; }
+	  .plan-row { display: flex; gap: .75rem; padding: .85rem 1rem;
+	              border-top: 1px solid var(--border); }
+	  .plan-row:first-child { border-top: none; }
+	  .plan-num { width: 24px; height: 24px; border-radius: 50%; flex: 0 0 auto;
+	              display: flex; align-items: center; justify-content: center;
+	              background: var(--success); color: var(--bg); font-weight: 800;
+	              font-size: .72rem; }
+	  .plan-main { min-width: 0; flex: 1; }
+	  .plan-title { font-weight: 700; margin-bottom: .2rem; }
+	  .plan-meta, .plan-change { color: var(--muted); font-size: .78rem; }
+	  .plan-meta code { background: var(--soft); color: var(--text);
+	                    padding: .1rem .35rem; border-radius: 3px; }
+
+	  /* KIND BADGES */
+	  .kind-badge { display: inline-block; border: 1px solid var(--border);
+	                color: var(--muted); background: var(--soft); border-radius: 4px;
+	                padding: .05rem .3rem; font-size: .62rem; font-weight: 800;
+	                letter-spacing: .05em; vertical-align: middle; }
+	  .kind-users { color: var(--primary); border-color: var(--primary); background: var(--primary-soft); }
+	  .kind-computers { color: var(--success); border-color: var(--success); background: var(--success-soft); }
+	  .kind-groups { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
+	  .kind-domains { color: var(--purple); border-color: var(--purple); background: var(--purple-soft); }
 
   /* PATH CARD */
   .path-card { background: var(--card); border: 1px solid var(--border);
@@ -977,6 +1252,23 @@ _HTML_HEAD = """\
                  font-family: "SF Mono", Menlo, Consolas, monospace; font-size: .82rem;
                  line-height: 1.6; white-space: pre; overflow-x: auto;
                  border-bottom: 1px solid var(--border); }
+  .exploit-only { padding: .8rem 1rem; border-bottom: 1px solid var(--border);
+                  background: color-mix(in srgb, var(--success-soft) 55%, transparent); }
+  .exploit-hop { display: flex; align-items: center; gap: .45rem; flex-wrap: wrap;
+                 padding: .3rem 0; font-size: .82rem; }
+  .exploit-num { width: 20px; height: 20px; border-radius: 50%; background: var(--success);
+                 color: var(--bg); display: inline-flex; align-items: center;
+                 justify-content: center; font-weight: 800; font-size: .68rem; }
+  .exploit-desc, .exploit-actor { color: var(--muted); }
+  .exploit-actor code { background: var(--purple-soft); color: var(--purple);
+                        padding: .1rem .35rem; border-radius: 3px; }
+  .graph-chain { border-bottom: 1px solid var(--border); }
+  .graph-chain > summary { cursor: pointer; list-style: none; color: var(--muted);
+                           font-size: .78rem; font-weight: 700; padding: .55rem 1rem;
+                           background: var(--soft); user-select: none; }
+  .graph-chain > summary::before { content: "▶ "; font-size: .6rem; }
+  .graph-chain[open] > summary::before { content: "▼ "; }
+  .graph-chain .chain-ascii { border-bottom: none; }
 
   /* CHAIN PILLS */
   .path-chain { padding: .75rem 1.25rem; display: flex; flex-wrap: wrap;
@@ -1043,21 +1335,34 @@ _HTML_HEAD = """\
                        border-radius: 3px; color: var(--purple); }
   .ident-arrow { font-weight: 700; }
 
-  /* COMMANDS */
+	  /* COMMANDS */
   .cmd-details { margin: .35rem 0 0; }
   .cmd-details > summary { cursor: pointer; color: var(--primary);
                            font-size: .76rem; font-weight: 600; padding: .15rem 0;
                            list-style: none; user-select: none; }
   .cmd-details > summary::before { content: "▶ "; font-size: .6rem; }
   .cmd-details[open] > summary::before { content: "▼ "; }
-  .cmd-details > summary:hover { color: var(--text); }
-  .cmd-pre { background: var(--code-bg); color: var(--code-text);
-             padding: .85rem 1rem; margin: 0; font-size: .8rem;
+	  .cmd-details > summary:hover { color: var(--text); }
+	  .cmd-box { margin-top: .35rem; border: 1px solid var(--border);
+	             border-radius: 6px; overflow: hidden; background: var(--code-bg); }
+	  .cmd-toolbar { display: flex; align-items: center; justify-content: space-between;
+	                 gap: .75rem; padding: .35rem .55rem; background: var(--soft);
+	                 border-bottom: 1px solid var(--border); color: var(--muted);
+	                 font-size: .72rem; font-weight: 700; }
+	  .copy-btn { border: 1px solid var(--border); background: var(--card);
+	              color: var(--text); border-radius: 4px; padding: .15rem .45rem;
+	              font: inherit; cursor: pointer; }
+	  .copy-btn:hover { border-color: var(--primary); color: var(--primary); }
+	  .cmd-pre { background: var(--code-bg); color: var(--code-text);
+	             padding: .85rem 1rem; margin: 0; font-size: .8rem;
              line-height: 1.7; overflow-x: auto;
              white-space: pre-wrap; word-break: break-word; }
   .cmd-pre.small { font-size: .76rem; padding: .55rem .75rem;
                    border-radius: 5px; margin-top: .35rem; }
   .cmd-pre .cmt { color: var(--code-cmt); }
+  .placeholder { color: var(--warn); background: var(--warn-soft);
+                 border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent);
+                 border-radius: 3px; padding: 0 .18rem; font-weight: 700; }
 
   /* FLAG PILLS */
   .flag-pill { display: inline-block; font-size: .68rem; font-weight: 600;
@@ -1097,8 +1402,17 @@ _HTML_HEAD = """\
                     opacity: .9; }
 
   /* QUICK-WINS */
+  .quickwin-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+                      gap: .5rem; margin-bottom: .85rem; }
+  .quickwin-summary .qw-tile { display: flex; align-items: center; gap: .55rem;
+                               border-radius: 6px; padding: .45rem .6rem; }
+  .quickwin-summary .qw-tile-num { font-size: 1rem; line-height: 1; }
+  .quickwin-summary .qw-tile-cat { margin-top: 0; }
   .qw-cat { margin-bottom: 1.25rem; padding-bottom: 1rem;
             border-bottom: 1px dashed var(--border); }
+  details.qw-cat > summary { cursor: pointer; list-style: none; user-select: none; }
+  details.qw-cat > summary::before { content: "▶"; color: var(--muted); font-size: .65rem; }
+  details.qw-cat[open] > summary::before { content: "▼"; }
   .qw-cat:last-child { border-bottom: none; }
   .qw-cat-head { display: flex; align-items: baseline; gap: .55rem;
                  margin-bottom: .35rem; }
@@ -1118,31 +1432,9 @@ _HTML_HEAD = """\
                     margin-bottom: .35rem; }
   .qw-item .cmd-pre { margin-top: .35rem; font-size: .76rem;
                       padding: .55rem .7rem; border-radius: 4px; }
-
-  /* QUICK-WINS */
-  .qw-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-              gap: .65rem; margin-bottom: 1.25rem; }
-  .qw-tile { background: var(--soft); border: 1px solid var(--border);
-             border-radius: 8px; padding: .75rem .85rem; text-decoration: none;
-             color: var(--text); transition: all .15s; }
-  .qw-tile:hover { background: var(--primary-soft); border-color: var(--primary); }
-  .qw-tile-num { font-size: 1.4rem; font-weight: 700; color: var(--primary); }
-  .qw-tile-cat { font-size: .75rem; color: var(--muted); margin-top: .15rem; }
-  .qw-section { margin-bottom: .85rem; border: 1px solid var(--border);
-                border-radius: 8px; padding: .75rem 1rem; background: var(--card); }
-  .qw-section > summary { cursor: pointer; list-style: none; display: flex;
-                          align-items: center; gap: .5rem; font-weight: 600; }
-  .qw-section > summary::before { content: "▶"; font-size: .7rem; color: var(--muted); }
-  .qw-section[open] > summary::before { content: "▼"; }
-  .qw-cat { font-size: .95rem; }
-  .qw-count { background: var(--soft); color: var(--muted); font-size: .72rem;
-              padding: .15rem .45rem; border-radius: 10px; font-weight: 700; }
-  .qw-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-             gap: .6rem; margin-top: .75rem; }
-  .qw-card { background: var(--soft); border: 1px solid var(--border);
-             border-radius: 6px; padding: .6rem .75rem; }
-  .qw-card-name { font-weight: 600; font-size: .85rem; margin-bottom: .2rem; }
-  .qw-card-detail { color: var(--muted); font-size: .8rem; margin-bottom: .35rem; }
+  .qw-more { margin-top: .6rem; }
+  .qw-more > summary { cursor: pointer; color: var(--primary); font-size: .78rem;
+                       font-weight: 700; list-style: none; }
 
   /* DATA TABLE */
   .data-table { width: 100%; border-collapse: collapse; margin-top: .5rem; }
@@ -1155,6 +1447,23 @@ _HTML_HEAD = """\
   .data-table code { background: var(--soft); padding: .1rem .35rem;
                      border-radius: 3px; }
   .chain-cell { white-space: nowrap; overflow-x: auto; max-width: 480px; }
+  .object-control-block { display: flex; flex-direction: column; gap: .55rem; }
+  .object-tools { display: flex; justify-content: flex-end; }
+  .object-filter { width: min(260px, 100%); background: var(--soft); color: var(--text);
+                   border: 1px solid var(--border); border-radius: 5px;
+                   padding: .35rem .55rem; font: inherit; font-size: .8rem; }
+  .object-filter:focus { outline: none; border-color: var(--primary); }
+  .relation-chips { display: flex; flex-wrap: wrap; gap: .35rem; }
+  .relation-chip { display: inline-flex; align-items: center; gap: .35rem;
+                   border: 1px solid var(--border); background: var(--soft);
+                   border-radius: 999px; padding: .15rem .45rem; color: var(--muted);
+                   font-size: .72rem; }
+  .relation-chip b { color: var(--text); }
+  .object-table { margin-top: 0; }
+  .show-all { border: 1px dashed var(--border); border-radius: 6px;
+              padding: .5rem .65rem; }
+  .show-all > summary { cursor: pointer; color: var(--primary); font-size: .8rem;
+                        font-weight: 700; list-style: none; }
 
   /* STATS */
   .stats-details { margin-bottom: 1.25rem; background: var(--card);
@@ -1185,6 +1494,35 @@ _HTML_HEAD = """\
                  border-radius: 8px; padding: 1rem; color: var(--muted);
                  text-align: center; font-size: .9rem; }
 
+  .section-banner { border-left: 4px solid var(--primary); background: var(--soft);
+                    padding: .75rem 1.25rem; border-radius: 8px; margin-bottom: 1.5rem;
+                    display: flex; align-items: center; gap: .75rem; }
+  .section-banner .banner-title { font-size: .8rem; letter-spacing: .1em;
+                                  text-transform: uppercase; font-weight: 800; }
+  .section-banner .banner-meta { font-size: .75rem; color: var(--muted); }
+  .section-banner.attack { border-left-color: var(--success); background: var(--success-soft); }
+  .section-banner.attack .banner-title { color: var(--success); }
+  .section-banner.node { border-left-color: var(--purple); background: var(--purple-soft); }
+  .section-banner.node .banner-title { color: var(--purple); }
+
+  @media (max-width: 720px) {
+    body { padding: .75rem; font-size: 13px; }
+    .title { line-height: 1.8; }
+    .sticky-nav { top: 0; margin-left: -.75rem; margin-right: -.75rem;
+                  padding-left: .75rem; padding-right: .75rem; }
+    .report-section { padding: .8rem; border-radius: 8px; }
+    .plan-head, .path-head, .pivot-head { align-items: flex-start; }
+    .plan-head { flex-direction: column; }
+    .plan-stats { justify-content: flex-start; }
+    .step { gap: .55rem; padding: .65rem .75rem; }
+    .step-num, .plan-num { width: 22px; height: 22px; }
+    .exploit-hop { align-items: flex-start; }
+    .data-table { display: block; overflow-x: auto; white-space: nowrap; }
+    .quickwin-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .object-tools { justify-content: stretch; }
+    .object-filter { width: 100%; }
+  }
+
   footer { color: var(--muted); font-size: .75rem; padding-top: 1rem;
            border-top: 1px solid var(--border); margin-top: 2rem; text-align: center; }
   footer a { color: var(--primary); text-decoration: none; }
@@ -1208,15 +1546,33 @@ def render_html(
     tgt_name = _escape(_display_name(G, target))
 
     head = _HTML_HEAD.replace("{{TITLE_SUFFIX}}", "Attack Path Report")
+    nav_items = [("Verdict", "verdict")]
+    if paths:
+        nav_items.extend([("Action plan", "action-plan"), ("Best path", "best-path")])
+        if len(paths) > 1:
+            nav_items.append(("More paths", "more-paths"))
+    if pivots:
+        nav_items.append(("Pivots", "pivots"))
+    if intermediate:
+        nav_items.append(("Intermediate", "intermediate"))
+    if quickwins:
+        nav_items.append(("Quick-wins", "quickwins"))
+    if stats:
+        nav_items.append(("Stats", "stats"))
     body_parts = [
         head,
-        f'<div class="title">🐶 Pathdog &nbsp;·&nbsp; '
+        f'<div class="title"><span class="brand">Pathdog</span> &nbsp;·&nbsp; '
         f'<code>{src_name}</code> → <code>{tgt_name}</code></div>',
-        _verdict_html(G, source, target, paths, pivots),
+        _sticky_nav_html(nav_items),
+        _verdict_html(
+            G, source, target, paths, pivots,
+            info_only=bool(intermediate or quickwins),
+        ),
     ]
 
     # ── Best path visible by default ──────────────────────────────────────────
     if paths:
+        body_parts.append(_action_plan_html(paths[0], G))
         body_parts.append(_path_card_html(paths[0], G, 1, is_best=True))
         # Extra paths collapsed
         if len(paths) > 1:
@@ -1225,7 +1581,7 @@ def render_html(
                 for i, p in enumerate(paths[1:], 2)
             )
             body_parts.append(
-                f'<details class="more-section">'
+                f'<details class="more-section" id="more-paths">'
                 f'<summary>More paths ({len(paths) - 1})</summary>'
                 f'{extra}</details>'
             )
@@ -1233,26 +1589,26 @@ def render_html(
     # ── Pivots, intermediates, quickwins — visible by default ────────────────
     if pivots:
         body_parts.append(
-            f'<details class="more-section" open>'
+            f'<details class="more-section" id="pivots" open>'
             f'<summary>Pivot candidates ({len(pivots)})</summary>'
             f'{_pivots_html(G, pivots)}</details>'
         )
     if intermediate:
         body_parts.append(
-            f'<details class="more-section" open>'
+            f'<details class="more-section" id="intermediate" open>'
             f'<summary>Intermediate targets ({len(intermediate)})</summary>'
             f'{_intermediate_html(G, source, intermediate)}</details>'
         )
     if quickwins:
         n = sum(len(v) for v in quickwins.values())
         body_parts.append(
-            f'<details class="more-section" open>'
+            f'<details class="more-section" id="quickwins" open>'
             f'<summary>Domain quick-wins ({n})</summary>'
             f'{_quickwins_html(quickwins)}</details>'
         )
     if stats:
         body_parts.append(
-            f'<details class="more-section">'
+            f'<details class="more-section" id="stats">'
             f'<summary>Graph stats</summary>'
             f'{_stats_html_block(stats)}</details>'
         )
@@ -1351,6 +1707,18 @@ def print_node_visibility_console(
     print()
 
 
+def _relation_chips(entries: list[dict]) -> str:
+    counts: dict[str, int] = {}
+    for e in entries:
+        rel = e.get("relation", "?")
+        counts[rel] = counts.get(rel, 0) + 1
+    chips = "".join(
+        f'<span class="relation-chip"><span>{_escape(rel)}</span><b>{count}</b></span>'
+        for rel, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    )
+    return f'<div class="relation-chips">{chips}</div>' if chips else ""
+
+
 def _object_control_out_html(G: "nx.DiGraph", entries: list[dict]) -> str:
     """Render outbound object control table (direct + via group)."""
     if not entries:
@@ -1360,19 +1728,35 @@ def _object_control_out_html(G: "nx.DiGraph", entries: list[dict]) -> str:
         dst_name = _escape(_display_name(G, e["dst"]))
         dst_kind = G.nodes[e["dst"]].get("kind", "?") if e["dst"] in G else "?"
         via = f'<span class="step-meta">via {_escape(e["via_group"])}</span>' if e["via_group"] else '<span class="step-meta">direct</span>'
+        filter_text = _escape(f'{e["relation"]} {dst_name} {e["via_group"] or "direct"}'.lower())
         rows.append(
-            f'<tr>'
+            f'<tr data-filter="{filter_text}">'
             f'<td><span class="rel-tag">{_escape(e["relation"])}</span></td>'
-            f'<td>{_kind_icon(dst_kind)} <code>{dst_name}</code>'
+            f'<td>{_kind_badge(dst_kind)} <code>{dst_name}</code>'
             f'{_flag_pills_html(G, e["dst"])}</td>'
             f'<td>{via}</td>'
             f'</tr>'
         )
+    shown = rows[:50]
+    remaining = rows[50:]
+    table_head = '<tr><th>Relation</th><th>Target object</th><th>How</th></tr>'
+    remaining_html = ""
+    if remaining:
+        remaining_html = (
+            f'<details class="show-all">'
+            f'<summary>Show all remaining rows ({len(remaining)})</summary>'
+            f'<table class="data-table object-table">{table_head}{"".join(remaining)}</table>'
+            f'</details>'
+        )
     return (
-        '<table class="data-table">'
-        '<tr><th>Relation</th><th>Target object</th><th>How</th></tr>'
-        + "".join(rows)
-        + '</table>'
+        '<div class="object-control-block">'
+        '<div class="object-tools">'
+        '<input class="object-filter" type="search" placeholder="Filter rows">'
+        '</div>'
+        f'{_relation_chips(entries)}'
+        f'<table class="data-table object-table">{table_head}{"".join(shown)}</table>'
+        f'{remaining_html}'
+        '</div>'
     )
 
 
@@ -1384,18 +1768,34 @@ def _object_control_in_html(G: "nx.DiGraph", entries: list[dict]) -> str:
     for e in entries:
         src_name = _escape(_display_name(G, e["src"]))
         src_kind = G.nodes[e["src"]].get("kind", "?") if e["src"] in G else "?"
+        filter_text = _escape(f'{e["relation"]} {src_name}'.lower())
         rows.append(
-            f'<tr>'
+            f'<tr data-filter="{filter_text}">'
             f'<td><span class="rel-tag">{_escape(e["relation"])}</span></td>'
-            f'<td>{_kind_icon(src_kind)} <code>{src_name}</code>'
+            f'<td>{_kind_badge(src_kind)} <code>{src_name}</code>'
             f'{_flag_pills_html(G, e["src"])}</td>'
             f'</tr>'
         )
+    shown = rows[:50]
+    remaining = rows[50:]
+    table_head = '<tr><th>Relation</th><th>Principal</th></tr>'
+    remaining_html = ""
+    if remaining:
+        remaining_html = (
+            f'<details class="show-all">'
+            f'<summary>Show all remaining rows ({len(remaining)})</summary>'
+            f'<table class="data-table object-table">{table_head}{"".join(remaining)}</table>'
+            f'</details>'
+        )
     return (
-        '<table class="data-table">'
-        '<tr><th>Relation</th><th>Principal</th></tr>'
-        + "".join(rows)
-        + '</table>'
+        '<div class="object-control-block">'
+        '<div class="object-tools">'
+        '<input class="object-filter" type="search" placeholder="Filter rows">'
+        '</div>'
+        f'{_relation_chips(entries)}'
+        f'<table class="data-table object-table">{table_head}{"".join(shown)}</table>'
+        f'{remaining_html}'
+        '</div>'
     )
 
 
@@ -1429,11 +1829,26 @@ def render_html_node_visibility(
     inbound_control = inbound_control or []
 
     head = _HTML_HEAD.replace("{{TITLE_SUFFIX}}", _escape(f"Node Visibility: {_display_name(G, node)}"))
+    nav_items = []
+    if outbound_paths:
+        nav_items.extend([("Action plan", "action-plan"), ("Best path", "best-path")])
+        if len(outbound_paths) > 1:
+            nav_items.append(("More paths", "more-paths"))
+    if outbound_intermediate:
+        nav_items.append(("Reachable HVTs", "intermediate"))
+    nav_items.extend([
+        ("Inbound attackers", "inbound-attackers"),
+        ("Outbound control", "outbound-control"),
+        ("Inbound control", "inbound-control"),
+    ])
+    if stats:
+        nav_items.append(("Stats", "stats"))
     body_parts = [
         head,
-        f'<div class="title">🐶 Pathdog &nbsp;·&nbsp; '
+        f'<div class="title"><span class="brand">Pathdog</span> &nbsp;·&nbsp; '
         f'<span style="color:var(--muted);font-size:.85rem">node visibility</span>'
         f' &nbsp;·&nbsp; <code>{node_name}</code> {flags_html}</div>',
+        _sticky_nav_html(nav_items),
     ]
 
     # ── Attack paths (outbound) + collapsible secondary sections ─────────────
@@ -1446,20 +1861,23 @@ def render_html_node_visibility(
         if target else "→ Attack Paths — reachable targets"
     )
     if outbound_paths:
-        outbound_path_content = _path_card_html(outbound_paths[0], G, 1, is_best=True)
+        outbound_path_content = (
+            _action_plan_html(outbound_paths[0], G)
+            + _path_card_html(outbound_paths[0], G, 1, is_best=True)
+        )
         if len(outbound_paths) > 1:
             extra = "".join(
                 _path_card_html(p, G, i, is_best=False)
                 for i, p in enumerate(outbound_paths[1:], 2)
             )
             outbound_path_content += (
-                f'<details class="more-section">'
+                f'<details class="more-section" id="more-paths">'
                 f'<summary>More paths ({len(outbound_paths) - 1})</summary>'
                 f'{extra}</details>'
             )
         if outbound_intermediate:
             outbound_path_content += (
-                f'<details class="more-section" open>'
+                f'<details class="more-section" id="intermediate" open>'
                 f'<summary>Other reachable high-value targets ({len(outbound_intermediate)})'
                 f' — nodes reachable from here, useful as pivot steps even without a direct DA path'
                 f'</summary>'
@@ -1467,7 +1885,7 @@ def render_html_node_visibility(
             )
     elif outbound_intermediate:
         outbound_path_content = (
-            f'<details class="more-section" open>'
+            f'<details class="more-section" id="intermediate" open>'
             f'<summary>Other reachable high-value targets ({len(outbound_intermediate)})'
             f' — nodes reachable from here, useful as pivot steps even without a direct DA path'
             f'</summary>'
@@ -1479,21 +1897,21 @@ def render_html_node_visibility(
         )
 
     outbound_path_content += (
-        f'<details class="more-section">'
+        f'<details class="more-section" id="inbound-attackers">'
         f'<summary>← Inbound Attackers ({inbound_count} principal(s))'
         f' — who has an attack path leading TO this node</summary>'
         f'{_inbound_sources_html(G, inbound_sources)}'
         f'</details>'
     )
     outbound_path_content += (
-        f'<details class="more-section">'
+        f'<details class="more-section" id="outbound-control">'
         f'<summary>→ Outbound Object Control ({direct_count} direct · {indirect_count} via group)'
         f' — objects this node has privileges over</summary>'
         f'{_object_control_out_html(G, outbound_control)}'
         f'</details>'
     )
     outbound_path_content += (
-        f'<details class="more-section">'
+        f'<details class="more-section" id="inbound-control">'
         f'<summary>← Inbound Object Control ({len(inbound_control)} principal(s))'
         f' — principals with direct privileges over this node</summary>'
         f'{_object_control_in_html(G, inbound_control)}'
@@ -1510,7 +1928,7 @@ def render_html_node_visibility(
 
     if stats:
         body_parts.append(
-            f'<details class="more-section">'
+            f'<details class="more-section" id="stats">'
             f'<summary>Graph stats</summary>'
             f'{_stats_html_block(stats)}</details>'
         )
@@ -1675,20 +2093,35 @@ def render_html_multi(
 
     tgt_name = _escape(_display_name(G, target))
     head = _HTML_HEAD.replace("{{TITLE_SUFFIX}}", "Multi-User Attack Path Report")
+    nav_items = [("Owned users", "owned-users")]
+    if pivots:
+        nav_items.append(("Pivots", "pivots"))
+    if quickwins:
+        nav_items.append(("Quick-wins", "quickwins"))
+    if stats:
+        nav_items.append(("Stats", "stats"))
 
     body_parts = [
         head,
-        f'<div class="title">🐶 Pathdog &nbsp;·&nbsp; '
+        f'<div class="title"><span class="brand">Pathdog</span> &nbsp;·&nbsp; '
         f'target <code>{tgt_name}</code> &nbsp;·&nbsp; {len(results)} owned</div>',
+        _sticky_nav_html(nav_items),
+        '<div id="owned-users"></div>',
     ]
 
     # One block per user — best path visible, rest collapsed
     for source, paths in results:
         src_label = _escape(_display_name(G, source))
         body_parts.append('<div class="user-block">')
-        body_parts.append(f'<div class="user-tag">👤 <code>{src_label}</code></div>')
-        body_parts.append(_verdict_html(G, source, target, paths, pivots))
+        body_parts.append(f'<div class="user-tag">{_kind_badge("users")} <code>{src_label}</code></div>')
+        body_parts.append(
+            _verdict_html(
+                G, source, target, paths, pivots,
+                info_only=bool(intermediates.get(source) or quickwins),
+            )
+        )
         if paths:
+            body_parts.append(_action_plan_html(paths[0], G))
             body_parts.append(_path_card_html(paths[0], G, 1, is_best=True))
             if len(paths) > 1:
                 extra = "".join(
@@ -1713,20 +2146,20 @@ def render_html_multi(
     # Global sections (pivots / quickwins) — open; stats — collapsed
     if pivots:
         body_parts.append(
-            f'<details class="more-section" open>'
+            f'<details class="more-section" id="pivots" open>'
             f'<summary>Pivot candidates ({len(pivots)})</summary>'
             f'{_pivots_html(G, pivots)}</details>'
         )
     if quickwins:
         n = sum(len(v) for v in quickwins.values())
         body_parts.append(
-            f'<details class="more-section" open>'
+            f'<details class="more-section" id="quickwins" open>'
             f'<summary>Domain quick-wins ({n})</summary>'
             f'{_quickwins_html(quickwins)}</details>'
         )
     if stats:
         body_parts.append(
-            f'<details class="more-section">'
+            f'<details class="more-section" id="stats">'
             f'<summary>Graph stats</summary>'
             f'{_stats_html_block(stats)}</details>'
         )
@@ -1809,12 +2242,9 @@ def render_html_combined(
     head = _HTML_HEAD.replace("{{TITLE_SUFFIX}}", _escape(f"Combined — {_display_name(G, node_id)}"))
 
     attack_banner = (
-        '<div style="border-left:4px solid var(--success);background:var(--success-soft);'
-        'padding:.75rem 1.25rem;border-radius:8px;margin-bottom:1.5rem;'
-        'display:flex;align-items:center;gap:.75rem;">'
-        '<span style="font-size:.8rem;letter-spacing:.1em;text-transform:uppercase;'
-        'font-weight:700;color:var(--success);">⚔ Attack Paths</span>'
-        '<span style="font-size:.75rem;color:var(--muted);">— -u</span>'
+        '<div class="section-banner attack">'
+        '<span class="banner-title">Attack Paths</span>'
+        '<span class="banner-meta">-u</span>'
         '</div>'
     )
 
@@ -1828,12 +2258,9 @@ def render_html_combined(
     )
 
     node_banner = (
-        f'<div style="border-left:4px solid var(--purple);background:var(--purple-soft);'
-        f'padding:.75rem 1.25rem;border-radius:8px;margin-bottom:1.5rem;'
-        f'display:flex;align-items:center;gap:.75rem;">'
-        f'<span style="font-size:.8rem;letter-spacing:.1em;text-transform:uppercase;'
-        f'font-weight:700;color:var(--purple);">🔍 Node Visibility</span>'
-        f'<span style="font-size:.75rem;color:var(--muted);">— --node <code '
+        f'<div class="section-banner node">'
+        f'<span class="banner-title">Node Visibility</span>'
+        f'<span class="banner-meta">--node <code '
         f'style="background:var(--purple-soft);color:var(--purple);padding:.1rem .3rem;'
         f'border-radius:3px;">{node_name}</code></span>'
         f'</div>'
