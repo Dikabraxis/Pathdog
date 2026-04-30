@@ -103,6 +103,37 @@ generation, or deciding which owned user to test next.
 python3 pathdog.py -z corp.zip --triage -f both --export-json
 ```
 
+Example console output:
+
+```
+[*] Loading corp.zip ...
+    → 18421 nodes, 76210 edges
+[*] Building graph ...
+[*] Graph: 18421 unique nodes, 75104 unique edges
+[*] Triage target context: S-1-5-21-...-512
+
+  ◆ Prioritized findings:
+      • [10] ADCS ADCSESC1: ADCSESC1 on UserTemplate@corp.local — UserTemplate@corp.local
+      • [10] DCSync: svc_sync@corp.local can DCSync corp.local — corp.local
+      • [9] Dangerous ACL: Helpdesk@corp.local has WriteDacl on high-value DOMAIN ADMINS@corp.local — DOMAIN ADMINS@corp.local
+      • [8] Password not required: Password not required: legacy@corp.local — legacy@corp.local
+      • [8] Unconstrained delegation: Unconstrained delegation: APP01.corp.local — APP01.corp.local
+      • [6] AS-REP roast: AS-REP roast: oldsvc@corp.local — oldsvc@corp.local
+      • [6] Kerberoast: Kerberoast: svc_sql@corp.local — svc_sql@corp.local
+      • [5] LAPS in use: LAPS in use: WS042.corp.local — WS042.corp.local
+      • [4] High-value target: High-value target: DOMAIN ADMINS@corp.local — DOMAIN ADMINS@corp.local
+
+  ◆ Domain quick-wins:
+      • High-value target (12)
+      • Kerberoast (4)
+      • AS-REP roast (2)
+      • Unconstrained delegation (1)
+      • ADCS ADCSESC1 (1)
+    full details + commands  →  see HTML report
+
+[+] Report(s) written: pathdog_report.md, pathdog_report.html, pathdog_report.json
+```
+
 The JSON export contains graph stats, findings, quick wins, pivots, owned
 results, path nodes/edges, weights, relations, and node-visibility data when
 `--node` is used.
