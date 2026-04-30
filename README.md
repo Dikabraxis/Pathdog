@@ -16,7 +16,7 @@ Python 3.10+.
 ## Usage
 
 ```
-python pathdog.py -z <dump.zip> -u <user> [options]
+python3 pathdog.py -z <dump.zip> -u <user> [options]
 ```
 
 | Flag | Description |
@@ -40,26 +40,26 @@ python pathdog.py -z <dump.zip> -u <user> [options]
 
 ```bash
 # Basic, find paths from a single owned user
-python pathdog.py -z corp.zip -u john.doe@corp.local
+python3 pathdog.py -z corp.zip -u john.doe@corp.local
 
 # Multiple ZIPs, multiple users (paths can cross-chain between them)
-python pathdog.py -z dump1.zip dump2.zip -u alice@corp.local bob@corp.local
+python3 pathdog.py -z dump1.zip dump2.zip -u alice@corp.local bob@corp.local
 
 # Owned users from a text file (lines starting with # are ignored)
-python pathdog.py -z corp.zip -u owned.txt -k 5 -f html -v
+python3 pathdog.py -z corp.zip -u owned.txt -k 5 -f html -v
 
 # Target a computer instead of DA
-python pathdog.py -z corp.zip -u alice@corp.local -t DC01.corp.local
+python3 pathdog.py -z corp.zip -u alice@corp.local -t DC01.corp.local
 
 # Just inspect the dump without running pathfinding
-python pathdog.py -z corp.zip --list users
-python pathdog.py -z corp.zip --list all
+python3 pathdog.py -z corp.zip --list users
+python3 pathdog.py -z corp.zip --list all
 
 # 360° visibility on a node, what it can reach and who can reach it
-python pathdog.py -z corp.zip --node svc_backup@corp.local
+python3 pathdog.py -z corp.zip --node svc_backup@corp.local
 
 # Combine -u and --node, single HTML with both sections
-python pathdog.py -z corp.zip -u john.doe@corp.local --node svc_backup@corp.local -f html
+python3 pathdog.py -z corp.zip -u john.doe@corp.local --node svc_backup@corp.local -f html
 ```
 
 ## What you get
