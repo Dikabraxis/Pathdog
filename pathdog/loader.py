@@ -191,14 +191,17 @@ def _extract_ce_arrays(objects: list[dict]) -> list[dict]:
                 if eid:
                     rels.append({"StartNode": str(eid), "EndNode": obj_id, "RelationshipType": rel_type})
 
-        # Sessions: user -[HasSession]→ computer
+        # Sessions: computer -[HasSession]→ user
+        # (BloodHound CE schema: Source=Computer, Destination=User. The edge
+        # represents "an attacker on this computer can steal this user's
+        # session" — direction follows the attack.)
         sessions_raw = obj.get("Sessions", {})
         sessions = sessions_raw.get("Results", []) if isinstance(sessions_raw, dict) else []
         for session in sessions:
             uid = session.get("UserSID")
             cid = session.get("ComputerSID") or obj_id
             if uid:
-                rels.append({"StartNode": str(uid), "EndNode": str(cid), "RelationshipType": "HasSession"})
+                rels.append({"StartNode": str(cid), "EndNode": str(uid), "RelationshipType": "HasSession"})
 
         # AllowedToDelegate: obj -[AllowedToDelegate]→ target
         # Some BloodHound exports list raw SPN strings here ("cifs/host.domain")

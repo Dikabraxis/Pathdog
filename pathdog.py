@@ -183,12 +183,12 @@ def _collect_node_data(G, args) -> dict | None:
     if target:
         pruned = prune_to_target(G, target)
         if node_id in pruned:
-            print(f"[*] Computing outbound paths ...")
+            print("[*] Computing outbound paths ...")
             try:
                 outbound_paths = find_paths(pruned, node_id, target, k=args.paths)
             except ValueError:
                 pass
-        print(f"[*] Computing reachable high-value targets ...")
+        print("[*] Computing reachable high-value targets ...")
         outbound_intermediate = find_intermediate_targets(
             G, node_id, excluded={target}, top_n=args.fallback_top,
         )
@@ -197,12 +197,12 @@ def _collect_node_data(G, args) -> dict | None:
             G, node_id, excluded=set(), top_n=args.fallback_top,
         )
 
-    print(f"[*] Computing inbound paths ...")
+    print("[*] Computing inbound paths ...")
     inbound_sources = find_inbound_sources(G, node_id, top_n=10)
     if inbound_sources:
         print(f"[*] Inbound: {len(inbound_sources)} principal(s) with a path to this node")
 
-    print(f"[*] Computing object control ...")
+    print("[*] Computing object control ...")
     outbound_control = find_outbound_object_control(G, node_id)
     inbound_control = find_inbound_object_control(G, node_id)
     if outbound_control:
@@ -282,7 +282,7 @@ def main() -> int:
         return 1
     all_nodes, all_edges = result
 
-    print(f"[*] Building graph ...")
+    print("[*] Building graph ...")
     G = build_graph(all_nodes, all_edges)
     print(f"[*] Graph: {G.number_of_nodes()} unique nodes, {G.number_of_edges()} unique edges")
 
@@ -331,7 +331,7 @@ def main() -> int:
     print(f"[*] Target node: {target}")
 
     # ── Prune graph ───────────────────────────────────────────────────────────
-    print(f"[*] Pruning graph to ancestors of target ...")
+    print("[*] Pruning graph to ancestors of target ...")
     pruned = prune_to_target(G, target)
     stats = graph_stats(G, pruned)
     print(f"[*] Pruned: {stats['pruned_nodes']} nodes, {stats['pruned_edges']} edges "

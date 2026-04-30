@@ -1,12 +1,19 @@
 """Markdown + HTML report renderer for pathdog results."""
 
 from __future__ import annotations
+
+import os
+import sys
 from typing import TYPE_CHECKING
 
-from .commands import get_commands, CommandSet
+from .commands import CommandSet, get_commands
+from .explanations import for_edge as _explain_edge
+from .explanations import for_quickwin as _explain_quickwin
+from .explanations import for_vector as _explain_vector
 
 if TYPE_CHECKING:
     import networkx as nx
+
     from .pathfinder import PathResult
     from .quickwins import QuickWin
 
@@ -98,9 +105,6 @@ def _path_yields_dcsync(G: "nx.DiGraph", path: "PathResult") -> bool:
 
 
 # ── ANSI colors ───────────────────────────────────────────────────────────────
-
-import os
-import sys
 
 _USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
@@ -460,10 +464,6 @@ def render_markdown_multi(
 
 # ── HTML ──────────────────────────────────────────────────────────────────────
 
-from .explanations import for_edge as _explain_edge
-from .explanations import for_vector as _explain_vector
-from .explanations import for_quickwin as _explain_quickwin
-
 
 def _escape(s: str) -> str:
     return (s.replace("&", "&amp;").replace("<", "&lt;")
@@ -592,6 +592,18 @@ def _step_html(
             f'</details>'
         )
 
+    alt_html = ""
+    alt_rels = [
+        r for r in (edge.get("relations") or {})
+        if r != rel and r not in ("MemberOf", "Contains")
+    ]
+    if alt_rels:
+        alt_html = (
+            '<div class="step-meta">also has on this target: '
+            + " ".join(f'<span class="rel-tag rel-tag-alt">{_escape(r)}</span>' for r in sorted(alt_rels))
+            + '</div>'
+        )
+
     body = (
         f'<div class="step step-action">'
         f'<div class="step-num">{step_num}</div>'
@@ -605,6 +617,7 @@ def _step_html(
         f'<div class="step-title">{_escape(explain["title"])}</div>'
         f'<div class="step-explain">{_escape(explain["plain"])}</div>'
         f'<div class="step-impact"><b>After this:</b> {_escape(explain["impact"])}</div>'
+        f'{alt_html}'
         f'{cmd_block}'
         f'{ident_change}'
         f'</div></div>'
@@ -1021,6 +1034,8 @@ _HTML_HEAD = """\
   .rel-tag { background: var(--warn-soft); color: var(--warn); border: 1px solid var(--warn);
              padding: .1rem .4rem; border-radius: 4px; font-family: monospace;
              font-size: .72rem; font-weight: 600; }
+  .rel-tag-alt { background: transparent; color: var(--muted); border-color: var(--border);
+                 font-weight: 500; }
 
   /* IDENTITY CHANGE */
   .ident-change { color: var(--purple); font-size: .85rem; margin-top: .5rem; }
@@ -1321,12 +1336,16 @@ def print_node_visibility_console(
     print(f"\n  {_bold(_yellow('← INBOUND ATTACKERS'))}  who can reach {_cyan(name)}")
 
     if inbound_sources:
-        top = inbound_sources[0]
+        # inbound_sources is sorted by score; for "closest" we want fewest hops.
+        top = min(
+            inbound_sources,
+            key=lambda x: (x["path"].hops if x["path"] else 10**9, -x["score"]),
+        )
         top_name = _display_name(G, top["node"])
         top_hops = top["path"].hops if top["path"] else "?"
         print(f"    {_red('!')} {len(inbound_sources)} principal(s) — "
               f"closest: {_cyan(top_name)} {_dim(f'({top_hops} hops)')}")
-        print(f"    {_dim(f'  full list  →  see HTML report')}")
+        print(f"    {_dim('  full list  →  see HTML report')}")
     else:
         print(f"    {_green('✓')} No paths found from other principals.")
     print()
@@ -1409,7 +1428,7 @@ def render_html_node_visibility(
     outbound_control = outbound_control or []
     inbound_control = inbound_control or []
 
-    head = _HTML_HEAD.replace("{{TITLE_SUFFIX}}", f"Node Visibility: {_display_name(G, node)}")
+    head = _HTML_HEAD.replace("{{TITLE_SUFFIX}}", _escape(f"Node Visibility: {_display_name(G, node)}"))
     body_parts = [
         head,
         f'<div class="title">🐶 Pathdog &nbsp;·&nbsp; '
@@ -1666,7 +1685,7 @@ def render_html_multi(
     # One block per user — best path visible, rest collapsed
     for source, paths in results:
         src_label = _escape(_display_name(G, source))
-        body_parts.append(f'<div class="user-block">')
+        body_parts.append('<div class="user-block">')
         body_parts.append(f'<div class="user-tag">👤 <code>{src_label}</code></div>')
         body_parts.append(_verdict_html(G, source, target, paths, pivots))
         if paths:
@@ -1787,7 +1806,7 @@ def render_html_combined(
         )
         node_body = _html_body_only(node_html)
 
-    head = _HTML_HEAD.replace("{{TITLE_SUFFIX}}", f"Combined — {_display_name(G, node_id)}")
+    head = _HTML_HEAD.replace("{{TITLE_SUFFIX}}", _escape(f"Combined — {_display_name(G, node_id)}"))
 
     attack_banner = (
         '<div style="border-left:4px solid var(--success);background:var(--success-soft);'

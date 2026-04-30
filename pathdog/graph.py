@@ -27,36 +27,50 @@ def build_graph(nodes: list[dict], edges: list[dict]) -> nx.DiGraph:
         multi_rels[(src, dst)].add(rtype)
         w = EDGE_WEIGHTS.get(rtype, DEFAULT_WEIGHT)
         if G.has_edge(src, dst):
+            G[src][dst]["relations"][rtype] = w
             if G[src][dst]["weight"] > w:
                 G[src][dst]["weight"] = w
                 G[src][dst]["relation"] = rtype
         else:
-            G.add_edge(src, dst, relation=rtype, weight=w)
+            G.add_edge(src, dst, relation=rtype, weight=w, relations={rtype: w})
 
     # Synthesize DCSync edges: principal having both GetChanges and
     # GetChangesAll on a domain (or the equivalent extended right pair).
     # If only one of the pair is present, the edge alone is NOT exploitable —
     # bump its weight to deprioritize it during pathfinding.
     dcsync_w = EDGE_WEIGHTS.get("DCSync", 2)
-    inert_changes_w = 8  # GetChanges/GetChangesAll alone — not actionable on its own
+    inert_changes_w = 8  # replication rights alone — not actionable
+    repl_set = {"GetChanges", "GetChangesAll", "GetChangesInFilteredSet"}
     for (src, dst), rels in multi_rels.items():
         if "DCSync" in rels:
             continue
-        has_changes = bool(rels & {"GetChanges", "GetChangesInFilteredSet"})
+        # DCSync requires GetChanges + GetChangesAll. GetChangesInFilteredSet
+        # is the filtered-attribute-set right (RODC scenario) and does NOT
+        # substitute for GetChanges — treating it as such yields false positives.
+        has_changes = "GetChanges" in rels
         has_changes_all = "GetChangesAll" in rels
-        if has_changes and has_changes_all and G.nodes[dst].get("kind") == "domains":
+        is_domain = G.nodes[dst].get("kind") == "domains"
+        if has_changes and has_changes_all and is_domain:
             if G.has_edge(src, dst):
+                G[src][dst]["relations"]["DCSync"] = dcsync_w
                 if G[src][dst]["weight"] >= dcsync_w:
                     G[src][dst]["weight"] = dcsync_w
                     G[src][dst]["relation"] = "DCSync"
             else:
-                G.add_edge(src, dst, relation="DCSync", weight=dcsync_w)
-        elif (has_changes ^ has_changes_all) and G.nodes[dst].get("kind") == "domains":
-            # Only one half — keep the relation but make it expensive.
-            if G.has_edge(src, dst):
-                cur_rel = G[src][dst]["relation"]
-                if cur_rel in ("GetChanges", "GetChangesAll", "GetChangesInFilteredSet"):
-                    G[src][dst]["weight"] = inert_changes_w
+                G.add_edge(src, dst, relation="DCSync", weight=dcsync_w,
+                           relations={"DCSync": dcsync_w})
+        elif (rels & repl_set) and is_domain:
+            # Any replication right alone (or any partial subset that doesn't
+            # cover both GetChanges + GetChangesAll) is NOT actionable for
+            # secrets dumping. Bump weight so pathfinder doesn't treat it as
+            # a cheap shortcut to the domain.
+            if G.has_edge(src, dst) and G[src][dst]["relation"] in repl_set:
+                G[src][dst]["weight"] = inert_changes_w
+                # Reflect the penalty in the relations map too so HTML alts
+                # don't suggest these are cheap.
+                for r in G[src][dst]["relations"]:
+                    if r in repl_set:
+                        G[src][dst]["relations"][r] = inert_changes_w
 
     return G
 

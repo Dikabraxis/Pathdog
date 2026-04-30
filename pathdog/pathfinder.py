@@ -1,9 +1,11 @@
 """Path computation: dijkstra primary, shortest_simple_paths fallback."""
 
 from itertools import islice
+
 import networkx as nx
 
 _STRUCTURAL = {"MemberOf", "Contains"}
+_REPL_HALF_RIGHTS = {"GetChanges", "GetChangesAll", "GetChangesInFilteredSet"}
 
 
 def _exploit_fingerprint(result: "PathResult") -> tuple:
@@ -13,6 +15,22 @@ def _exploit_fingerprint(result: "PathResult") -> tuple:
         for e in result.edges
         if e["relation"] not in _STRUCTURAL
     )
+
+
+def _is_actionable_path(result: "PathResult") -> bool:
+    """False if any hop relies on a non-synthesized replication half-right.
+
+    GetChanges / GetChangesAll / GetChangesInFilteredSet alone do NOT grant
+    secrets dumping. If such a hop is the only "domain-control" edge, the
+    path looks like a route to DA but cannot actually be exploited end-to-end.
+    Such paths must not be counted as a successful "path found".
+    """
+    for e in result.edges:
+        if e["relation"] in _REPL_HALF_RIGHTS:
+            rels = e.get("relations") or {}
+            if "DCSync" not in rels:
+                return False
+    return True
 
 
 class PathResult:
@@ -34,11 +52,14 @@ def _path_to_result(G: nx.DiGraph, path: list[str]) -> PathResult:
         data = G[src][dst]
         w = data.get("weight", 5)
         total += w
+        primary = data.get("relation", "Unknown")
+        all_rels = data.get("relations", {primary: w})
         edges.append({
             "src": src,
             "dst": dst,
-            "relation": data.get("relation", "Unknown"),
+            "relation": primary,
             "weight": w,
+            "relations": all_rels,
         })
     return PathResult(nodes=path, edges=edges, weight=total)
 
@@ -57,23 +78,22 @@ def find_paths(
 
     results: list[PathResult] = []
 
-    if k == 1:
-        try:
-            path = nx.dijkstra_path(G, source, target, weight="weight")
-            results.append(_path_to_result(G, path))
-        except (nx.NetworkXNoPath, nx.NodeNotFound):
-            pass
-        return results
-
+    # We always iterate via shortest_simple_paths so we can skip non-actionable
+    # paths (e.g. only domain-control edge is a non-synthesized replication
+    # half-right). Caps the search width to avoid pathological graphs.
     try:
         gen = nx.shortest_simple_paths(G, source, target, weight="weight")
         seen_fps: set[tuple] = set()
-        for path in islice(gen, k * 10):
+        scan_cap = max(k * 10, 30)
+        for path in islice(gen, scan_cap):
             r = _path_to_result(G, path)
+            if not _is_actionable_path(r):
+                continue
             fp = _exploit_fingerprint(r)
-            if fp not in seen_fps:
-                seen_fps.add(fp)
-                results.append(r)
+            if fp in seen_fps:
+                continue
+            seen_fps.add(fp)
+            results.append(r)
             if len(results) >= k:
                 break
     except (nx.NetworkXNoPath, nx.NodeNotFound):
@@ -186,6 +206,8 @@ def find_intermediate_targets(
             pr = _path_to_result(G, path_nodes)
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             pr = None
+        if pr is not None and not _is_actionable_path(pr):
+            pr = None
         out.append({"node": nid, "score": score, "path": pr})
     return out
 
@@ -237,14 +259,14 @@ def find_pivot_candidates(
                 vectors.append("AS-REP roast (no creds needed)")
                 cmds.extend([
                     f"impacket-GetNPUsers '{d}/' -no-pass -usersfile <(echo {short}) -dc-ip <DC_IP> -format hashcat -outputfile asrep.hash",
-                    f"hashcat -m 18200 asrep.hash /usr/share/wordlists/rockyou.txt",
+                    "hashcat -m 18200 asrep.hash /usr/share/wordlists/rockyou.txt",
                 ])
                 score += 30
             if p.get("hasspn") and short.lower() != "krbtgt":
                 vectors.append("Kerberoast")
                 cmds.extend([
                     f"impacket-GetUserSPNs '{d}/<owned_user>:<owned_pass>' -dc-ip <DC_IP> -request-user '{short}' -outputfile kerb.hash",
-                    f"hashcat -m 13100 kerb.hash /usr/share/wordlists/rockyou.txt",
+                    "hashcat -m 13100 kerb.hash /usr/share/wordlists/rockyou.txt",
                 ])
                 score += 25
             if p.get("passwordnotreqd"):
@@ -278,7 +300,7 @@ def find_pivot_candidates(
             ptd = _path_to_result(pruned, path_nodes)
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             ptd = None
-        if ptd is None:
+        if ptd is None or not _is_actionable_path(ptd):
             continue
 
         # Closer to DA = better
@@ -325,24 +347,23 @@ def find_outbound_object_control(
     seen: set[tuple] = set()
     results: list[dict] = []
 
+    def _emit(src_id: str, dst: str, via_group: str | None):
+        data = G[src_id][dst]
+        rels = data.get("relations") or {data.get("relation", "Unknown"): data.get("weight", 5)}
+        for rel in rels:
+            if rel in ("MemberOf", "Contains"):
+                continue
+            key = (dst, rel, via_group)
+            if key not in seen:
+                seen.add(key)
+                results.append({"dst": dst, "relation": rel, "via_group": via_group})
+
     for _, dst in G.out_edges(node_id):
-        rel = G[node_id][dst].get("relation", "Unknown")
-        if rel in ("MemberOf", "Contains"):
-            continue
-        key = (dst, rel)
-        if key not in seen:
-            seen.add(key)
-            results.append({"dst": dst, "relation": rel, "via_group": None})
+        _emit(node_id, dst, None)
 
     for grp_id, grp_name in groups.items():
         for _, dst in G.out_edges(grp_id):
-            rel = G[grp_id][dst].get("relation", "Unknown")
-            if rel in ("MemberOf", "Contains"):
-                continue
-            key = (dst, rel)
-            if key not in seen:
-                seen.add(key)
-                results.append({"dst": dst, "relation": rel, "via_group": grp_name})
+            _emit(grp_id, dst, grp_name)
 
     results.sort(key=lambda x: (x["via_group"] is not None, x["relation"]))
     return results
@@ -360,11 +381,13 @@ def find_inbound_object_control(
         return []
     results = []
     for src, _ in G.in_edges(node_id):
-        rel = G[src][node_id].get("relation", "Unknown")
-        if rel in ("MemberOf", "Contains"):
-            continue
-        results.append({"src": src, "relation": rel})
-    results.sort(key=lambda x: x["relation"])
+        data = G[src][node_id]
+        rels = data.get("relations") or {data.get("relation", "Unknown"): data.get("weight", 5)}
+        for rel in rels:
+            if rel in ("MemberOf", "Contains"):
+                continue
+            results.append({"src": src, "relation": rel})
+    results.sort(key=lambda x: (x["src"], x["relation"]))
     return results
 
 
@@ -427,7 +450,7 @@ def find_inbound_sources(
             pr = _path_to_result(G, path_nodes)
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             pr = None
-        if pr is None:
+        if pr is None or not _is_actionable_path(pr):
             continue
         hop_bonus = max(0, 10 - pr.hops * 2)
         out.append({"node": nid, "score": base_score + hop_bonus, "path": pr})
