@@ -165,6 +165,9 @@ def build_json_report(
             }
             for source, paths in results
         ],
+        # Internal pivot dicts use "path_to_da" (legacy: target was always DA);
+        # the public JSON field is renamed "path_to_target" because -t can now
+        # point anywhere. Same value, clearer name for consumers.
         "pivots": [
             {
                 "node": item["node"],
