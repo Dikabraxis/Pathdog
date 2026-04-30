@@ -31,7 +31,7 @@ python3 pathdog.py -z <dump.zip> -u <user> [options]
 | `-k N` | Number of paths per user (default `3`). |
 | `-o BASENAME` | Output base name (default `pathdog_report`). |
 | `-f md \| html \| both` | Report format (default `html`). Pass `md` or `both` to also produce a Markdown report. |
-| `-l KIND` | List nodes and exit. `KIND` = `users`, `computers`, `groups`, `domains`, `gpos`, `ous`, `containers`, `certtemplates`, `enterprisecas`, `rootcas`, `aiacas`, `ntauthstores`, `all`. |
+| `-l KIND` | List nodes and exit. Omit `KIND` to list all nodes. `KIND` = `users`, `computers`, `groups`, `domains`, `gpos`, `ous`, `containers`, `certtemplates`, `enterprisecas`, `rootcas`, `aiacas`, `ntauthstores`, `all`. |
 | `-v` | Show graph statistics. |
 | `--triage` | Run global prioritized triage without requiring `-u`. |
 | `--export-json [FILE]` | Write a structured JSON report. Defaults to `<output>.json`. |
@@ -149,6 +149,9 @@ commands for:
 - `ADCSESC10a`, `ADCSESC10b`
 - `ADCSESC13`
 - `GoldenCert`
+- coercion/relay edges:
+  `CoerceAndRelayNTLMToSMB`, `CoerceAndRelayNTLMToLDAP`,
+  `CoerceAndRelayNTLMToLDAPS`, `CoerceAndRelayNTLMToADCS`
 - supporting rights such as `Enroll`, `AutoEnroll`, `ManageCA`,
   `ManageCertificates`, `DelegatedEnrollmentAgent`,
   `WritePKINameFlag`, and `WritePKIEnrollmentFlag`
@@ -172,6 +175,10 @@ Admins. The HTML report contains:
   privileges over, directly or through group membership.
 - **Inbound object control** (collapsible), principals with direct
   privileges over this node.
+
+Standalone `--node` reports stay focused on node visibility. Use `--triage`
+for domain-wide findings and quick-wins, or combine `-u` with `--node` when
+you want attack paths, global findings, and node visibility in one HTML report.
 
 When you pass both `-u` and `--node`, Pathdog produces a single combined
 HTML with the `-u` section on top (green banner) and the `--node` section

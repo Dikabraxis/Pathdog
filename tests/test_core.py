@@ -239,6 +239,36 @@ class CoreTests(unittest.TestCase):
         )
         self.assertIn("@DC01.corp.local", cmd.commands[0])
 
+    def test_computer_takeover_edges_switch_to_machine_identity(self):
+        for rel in ("GenericWrite", "GenericAll", "AllExtendedRights"):
+            with self.subTest(rel=rel):
+                _, next_actor = get_commands(
+                    rel,
+                    "U1",
+                    "C1",
+                    "alice@corp.local",
+                    "WS01.corp.local",
+                    "users",
+                    "computers",
+                    "alice@corp.local",
+                )
+                self.assertEqual(next_actor, "WS01$@corp.local")
+
+    def test_delegation_edges_use_target_domain_for_administrator(self):
+        for rel in ("AllowedToDelegate", "AllowedToAct", "WriteAccountRestrictions"):
+            with self.subTest(rel=rel):
+                _, next_actor = get_commands(
+                    rel,
+                    "U1",
+                    "C1",
+                    "alice@corp.local",
+                    "APP01.child.corp.local",
+                    "users",
+                    "computers",
+                    "alice@corp.local",
+                )
+                self.assertEqual(next_actor, "Administrator@child.corp.local")
+
 
 if __name__ == "__main__":
     unittest.main()

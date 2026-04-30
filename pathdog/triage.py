@@ -91,8 +91,7 @@ def collect_findings(G, *, quickwins: dict | None = None, limit: int | None = No
         # finding because it carries better evidence and runnable commands.
         if category.startswith("ADCS "):
             continue
-        base_category = "ADCS" if category.startswith("ADCS ") else category
-        severity = SEVERITY_BY_CATEGORY.get(base_category, 5)
+        severity = SEVERITY_BY_CATEGORY.get(category, 5)
         for qw in items:
             key = ("quickwin", category, qw.node_id, qw.detail)
             if key in seen:

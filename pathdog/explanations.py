@@ -67,8 +67,8 @@ _DESCRIPTIONS: dict[str, dict[str, str]] = {
     },
     "GetChangesInFilteredSet": {
         "title": "Filtered replication right",
-        "plain": "Replication right scoped to a filtered attribute set. Useful with GetChanges/GetChangesAll for partial DCSync.",
-        "impact": "Helper right; combine with the other replication rights.",
+        "plain": "Replication right scoped to the filtered attribute set. It does not substitute for GetChanges.",
+        "impact": "On its own, not a DCSync path. DCSync still requires GetChanges + GetChangesAll on the domain.",
     },
     "GenericAll": {
         "title": "Full control over the object",

@@ -63,14 +63,12 @@ def _next_actor(
     if rel_type in ("ForceChangePassword", "AddKeyCredentialLink"):
         return _computer_identity(dst_name) if dst_kind == "computers" else dst_name
     if rel_type in ("AllowedToDelegate", "AllowedToAct", "WriteAccountRestrictions"):
-        act = _parse(current)
-        return f"Administrator@{act['domain']}"
-    if rel_type == "GenericWrite" and dst_kind in user_kinds:
-        return dst_name
-    if rel_type == "GenericAll" and dst_kind in user_kinds:
-        return dst_name
-    if rel_type == "AllExtendedRights" and dst_kind in user_kinds:
-        return dst_name
+        dst = _parse(dst_name, dst_kind)
+        return f"Administrator@{dst['domain']}"
+    if rel_type in ("GenericWrite", "GenericAll", "AllExtendedRights"):
+        return _computer_identity(dst_name) if dst_kind == "computers" else (
+            dst_name if dst_kind in user_kinds else current
+        )
     if rel_type in ("ReadLAPSPassword", "SyncLAPSPassword"):
         # Local admin password → on-host SYSTEM → AD auth uses the machine account.
         if dst_kind == "computers":
