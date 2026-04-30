@@ -17,20 +17,25 @@ def _exploit_fingerprint(result: "PathResult") -> tuple:
     )
 
 
-def _is_actionable_path(result: "PathResult") -> bool:
-    """False if any hop relies on a non-synthesized replication half-right.
-
-    GetChanges / GetChangesAll / GetChangesInFilteredSet alone do NOT grant
-    secrets dumping. If such a hop is the only "domain-control" edge, the
-    path looks like a route to DA but cannot actually be exploited end-to-end.
-    Such paths must not be counted as a successful "path found".
-    """
-    for e in result.edges:
-        if e["relation"] in _REPL_HALF_RIGHTS:
-            rels = e.get("relations") or {}
-            if "DCSync" not in rels:
-                return False
+def _is_actionable_edge(data: dict) -> bool:
+    """Edge is non-actionable if its dominant relation is a replication
+    half-right and the (src,dst) pair was never synthesized into DCSync.
+    Used as the filter for `actionable_view`."""
+    if data.get("relation") in _REPL_HALF_RIGHTS:
+        return "DCSync" in (data.get("relations") or {})
     return True
+
+
+def actionable_view(G: nx.DiGraph) -> nx.DiGraph:
+    """Return a lightweight view of G that hides non-actionable edges.
+
+    Pre-filtering before path-finding (rather than rejecting paths after the
+    fact) means dijkstra never wastes its budget enumerating dead-ends, and
+    we don't need an arbitrary scan cap to bound that work.
+    """
+    return nx.subgraph_view(
+        G, filter_edge=lambda u, v: _is_actionable_edge(G[u][v])
+    )
 
 
 class PathResult:
@@ -78,17 +83,20 @@ def find_paths(
 
     results: list[PathResult] = []
 
-    # We always iterate via shortest_simple_paths so we can skip non-actionable
-    # paths (e.g. only domain-control edge is a non-synthesized replication
-    # half-right). Caps the search width to avoid pathological graphs.
+    # Pre-filter: drop non-actionable edges (e.g. lone replication half-rights
+    # that don't synthesize into DCSync) before path-finding so dijkstra never
+    # considers them. Path-level fingerprint dedup still runs on top.
+    Gv = actionable_view(G)
+    if source not in Gv or target not in Gv:
+        return results
+
     try:
-        gen = nx.shortest_simple_paths(G, source, target, weight="weight")
+        gen = nx.shortest_simple_paths(Gv, source, target, weight="weight")
         seen_fps: set[tuple] = set()
-        scan_cap = max(k * 10, 30)
-        for path in islice(gen, scan_cap):
-            r = _path_to_result(G, path)
-            if not _is_actionable_path(r):
-                continue
+        # k * 10 is plenty once dead-ends are pre-filtered; cap is just a
+        # safety belt against pathological graphs with massive edge fan-out.
+        for path in islice(gen, k * 10):
+            r = _path_to_result(Gv, path)
             fp = _exploit_fingerprint(r)
             if fp in seen_fps:
                 continue
@@ -199,14 +207,16 @@ def find_intermediate_targets(
         candidates.append((score, nid))
     candidates.sort(key=lambda x: (-x[0], reachable[x[1]]))
 
+    Gv = actionable_view(G)
     out: list[dict] = []
     for score, nid in candidates[:top_n]:
+        if nid not in Gv:
+            out.append({"node": nid, "score": score, "path": None})
+            continue
         try:
-            path_nodes = nx.dijkstra_path(G, source, nid, weight="weight")
-            pr = _path_to_result(G, path_nodes)
+            path_nodes = nx.dijkstra_path(Gv, source, nid, weight="weight")
+            pr = _path_to_result(Gv, path_nodes)
         except (nx.NetworkXNoPath, nx.NodeNotFound):
-            pr = None
-        if pr is not None and not _is_actionable_path(pr):
             pr = None
         out.append({"node": nid, "score": score, "path": pr})
     return out
@@ -235,6 +245,7 @@ def find_pivot_candidates(
     }, ...] sorted by score desc.
     """
     excluded_sources = excluded_sources or set()
+    pruned_v = actionable_view(pruned)
     out: list[dict] = []
 
     for nid in pruned.nodes:
@@ -295,12 +306,14 @@ def find_pivot_candidates(
         if not vectors:
             continue
 
+        if nid not in pruned_v or target not in pruned_v:
+            continue
         try:
-            path_nodes = nx.dijkstra_path(pruned, nid, target, weight="weight")
-            ptd = _path_to_result(pruned, path_nodes)
+            path_nodes = nx.dijkstra_path(pruned_v, nid, target, weight="weight")
+            ptd = _path_to_result(pruned_v, path_nodes)
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             ptd = None
-        if ptd is None or not _is_actionable_path(ptd):
+        if ptd is None:
             continue
 
         # Closer to DA = better
@@ -443,14 +456,17 @@ def find_inbound_sources(
 
     scored.sort(key=lambda x: -x[0])
 
+    Gv = actionable_view(G)
     out: list[dict] = []
     for base_score, nid in scored[:top_n * 3]:
+        if nid not in Gv or target_node not in Gv:
+            continue
         try:
-            path_nodes = nx.dijkstra_path(G, nid, target_node, weight="weight")
-            pr = _path_to_result(G, path_nodes)
+            path_nodes = nx.dijkstra_path(Gv, nid, target_node, weight="weight")
+            pr = _path_to_result(Gv, path_nodes)
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             pr = None
-        if pr is None or not _is_actionable_path(pr):
+        if pr is None:
             continue
         hop_bonus = max(0, 10 - pr.hops * 2)
         out.append({"node": nid, "score": base_score + hop_bonus, "path": pr})
