@@ -20,6 +20,9 @@ Python 3.10+.
 python3 pathdog.py -z <dump.zip> -u <user> [options]
 ```
 
+`-u` is required for attack-path mode. It is not required when using
+`--triage`, `--node`, or `--list`.
+
 | Flag | Description |
 |------|-------------|
 | `-z FILE` | BloodHound ZIP export(s). Multiple ZIPs are merged. |
@@ -204,7 +207,8 @@ Example console output for `--node` (visibility on a single node):
       full list  →  see HTML report
 ```
 
-ANSI colors are emitted when stdout is a TTY (auto-disabled by `NO_COLOR=1`).
+ANSI colors are emitted when stdout is a TTY, auto-disabled by `NO_COLOR=1`,
+and can be forced in captured output with `FORCE_COLOR=1`.
 
 ## Notes
 
