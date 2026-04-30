@@ -8,15 +8,18 @@ from datetime import datetime
 
 from pathdog.loader import load_zip
 from pathdog.graph import build_graph, resolve_target, prune_to_target, graph_stats
+from pathdog.json_export import build_json_report, write_json_report
 from pathdog.pathfinder import (
     find_paths, suggest_similar_nodes, find_intermediate_targets,
     find_pivot_candidates, find_inbound_sources,
     find_outbound_object_control, find_inbound_object_control,
 )
 from pathdog.quickwins import collect_all as collect_quickwins
+from pathdog.triage import collect_findings
 from pathdog.report import (
     render_markdown_multi, render_html_multi, print_paths_console,
-    print_intermediate_targets, print_quickwins, print_pivot_candidates,
+    print_intermediate_targets, print_quickwins, print_findings_console,
+    print_pivot_candidates,
     print_node_visibility_console,
     render_html_node_visibility, render_markdown_node_visibility,
     render_html_combined,
@@ -53,9 +56,13 @@ examples:
                    dest="fmt", help="Output format (default: html)")
     p.add_argument("-l", "--list", metavar="KIND", nargs="?", const="all",
                    dest="list_kind",
-                   help="List nodes and exit. KIND: users, computers, groups, domains, gpos, ous, all")
+                   help="List nodes and exit. KIND: users, computers, groups, domains, gpos, ous, containers, certtemplates, enterprisecas, rootcas, aiacas, ntauthstores, all")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="Show graph statistics")
+    p.add_argument("--triage", action="store_true",
+                   help="Run global prioritized triage without requiring -u")
+    p.add_argument("--export-json", nargs="?", const="", metavar="FILE",
+                   help="Write a structured JSON report. Optional FILE defaults to <output>.json")
     p.add_argument("--no-fallback", action="store_true",
                    help="Disable intermediate-target suggestions when no DA path is found")
     p.add_argument("--no-quickwins", action="store_true",
@@ -134,7 +141,11 @@ def _resolve_source(G, user: str):
 
 def _do_list(G, kind: str) -> None:
     """Print nodes filtered by kind and exit."""
-    kinds = {"all", "users", "computers", "groups", "domains", "gpos", "ous"}
+    kinds = {
+        "all", "users", "computers", "groups", "domains", "gpos", "ous",
+        "containers", "certtemplates", "enterprisecas", "rootcas",
+        "aiacas", "ntauthstores",
+    }
     if kind not in kinds:
         print(f"[!] Unknown kind '{kind}'. Choose from: {', '.join(sorted(kinds))}",
               file=sys.stderr)
@@ -266,10 +277,25 @@ def _do_node_visibility(G, args) -> int:
             ))
         written.append(html_path)
 
+    json_path = _json_path(args, base)
+    if json_path:
+        write_json_report(json_path, build_json_report(
+            G=G, target=data["target"], results=[], stats=data["stats"],
+            node_data=data,
+        ))
+        written.append(json_path)
+
     if written:
         print(f"\n[+] Report(s) written: {', '.join(written)}")
 
     return 0
+
+
+def _json_path(args, base: str) -> str | None:
+    """Return JSON output path, or None when JSON export is disabled."""
+    if args.export_json is None:
+        return None
+    return args.export_json or f"{base}.json"
 
 
 def main() -> int:
@@ -290,6 +316,70 @@ def main() -> int:
     if args.list_kind:
         _do_list(G, args.list_kind)
         return 0
+
+    # ── --triage mode (no -u required) ───────────────────────────────────────
+    if args.triage:
+        target = resolve_target(G, args.target)
+        if target:
+            print(f"[*] Triage target context: {target}")
+            pruned = prune_to_target(G, target)
+            stats = graph_stats(G, pruned)
+        else:
+            target = args.target or ""
+            stats = {
+                "total_nodes": G.number_of_nodes(),
+                "total_edges": G.number_of_edges(),
+                "pruned_nodes": G.number_of_nodes(),
+                "pruned_edges": G.number_of_edges(),
+                "reduction_pct": 0.0,
+            }
+            if args.target:
+                print(f"[!] Target '{args.target}' not found — triage will still run.",
+                      file=sys.stderr)
+
+        quickwins = {} if args.no_quickwins else collect_quickwins(G)
+        findings = collect_findings(G, quickwins=quickwins)
+
+        if findings:
+            print_findings_console(findings)
+        if quickwins:
+            print_quickwins(G, quickwins)
+
+        written: list[str] = []
+        base = args.output
+        extensions = [e for e in (".md", ".html") if args.fmt in (e[1:], "both")]
+        if any(os.path.exists(f"{base}{ext}") for ext in extensions):
+            base = f"{base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        if args.fmt in ("md", "both"):
+            md_path = f"{base}.md"
+            with open(md_path, "w", encoding="utf-8") as fh:
+                fh.write(render_markdown_multi(
+                    [], G, target, stats if args.verbose else None,
+                    quickwins=quickwins, findings=findings,
+                ))
+            written.append(md_path)
+
+        if args.fmt in ("html", "both"):
+            html_path = f"{base}.html"
+            with open(html_path, "w", encoding="utf-8") as fh:
+                fh.write(render_html_multi(
+                    [], G, target, stats if args.verbose else None,
+                    quickwins=quickwins, findings=findings,
+                ))
+            written.append(html_path)
+
+        json_path = _json_path(args, base)
+        if json_path:
+            write_json_report(json_path, build_json_report(
+                G=G, target=target, results=[], stats=stats,
+                quickwins=quickwins, findings=findings,
+            ))
+            written.append(json_path)
+
+        if written:
+            print(f"\n[+] Report(s) written: {', '.join(written)}")
+        return 0 if findings or quickwins else 2
 
     # ── --node mode: collect data (standalone) or store for combined report ────
     node_data = None
@@ -406,6 +496,11 @@ def main() -> int:
             total = sum(len(v) for v in quickwins.values())
             print(f"[*] Quick wins: {total} finding(s) across {len(quickwins)} categor(ies)")
 
+    print("[*] Building prioritized findings ...")
+    findings = collect_findings(G, quickwins=quickwins or {})
+    if findings:
+        print(f"[*] Findings: {len(findings)} prioritized item(s)")
+
     # ── Pivot candidates (principals in DA-subgraph attackable out-of-band) ───
     pivots: list[dict] = []
     if not args.no_pivots:
@@ -432,6 +527,9 @@ def main() -> int:
     if pivots:
         print_pivot_candidates(G, pivots)
 
+    if findings:
+        print_findings_console(findings)
+
     if quickwins:
         print_quickwins(G, quickwins)
 
@@ -450,6 +548,7 @@ def main() -> int:
             fh.write(render_markdown_multi(
                 all_results, G, target, report_stats,
                 intermediates=intermediates, quickwins=quickwins, pivots=pivots,
+                findings=findings,
             ))
         written.append(md_path)
 
@@ -460,13 +559,24 @@ def main() -> int:
                 fh.write(render_html_combined(
                     all_results, G, target, node_data, report_stats,
                     intermediates=intermediates, quickwins=quickwins, pivots=pivots,
+                    findings=findings,
                 ))
             else:
                 fh.write(render_html_multi(
                     all_results, G, target, report_stats,
                     intermediates=intermediates, quickwins=quickwins, pivots=pivots,
+                    findings=findings,
                 ))
         written.append(html_path)
+
+    json_path = _json_path(args, base)
+    if json_path:
+        write_json_report(json_path, build_json_report(
+            G=G, target=target, results=all_results, stats=stats,
+            intermediates=intermediates, quickwins=quickwins, pivots=pivots,
+            findings=findings, node_data=node_data,
+        ))
+        written.append(json_path)
 
     if written:
         print(f"\n[+] Report(s) written: {', '.join(written)}")

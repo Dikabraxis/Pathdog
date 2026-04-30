@@ -10,7 +10,22 @@ import json
 import zipfile
 from pathlib import Path
 
-EXPECTED_PREFIXES = ("users", "computers", "groups", "domains", "gpos", "ous")
+CORE_EXPECTED_PREFIXES = ("users", "computers", "groups", "domains", "gpos", "ous")
+
+EXPECTED_PREFIXES = (
+    "users",
+    "computers",
+    "groups",
+    "domains",
+    "gpos",
+    "ous",
+    "containers",
+    "certtemplates",
+    "enterprisecas",
+    "rootcas",
+    "aiacas",
+    "ntauthstores",
+)
 
 
 def _json_files(zf: zipfile.ZipFile) -> list[str]:
@@ -95,7 +110,7 @@ def load_zip(path: str) -> tuple[list[dict], list[dict]]:
                 if src and dst and rtype:
                     edges.append({"src": str(src), "dst": str(dst), "type": str(rtype)})
 
-        missing = [p for p in EXPECTED_PREFIXES if p not in found_kinds]
+        missing = [p for p in CORE_EXPECTED_PREFIXES if p not in found_kinds]
         if missing:
             import sys
             print(

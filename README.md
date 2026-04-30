@@ -1,7 +1,8 @@
 # Pathdog
 
-Parse a BloodHound ZIP export, find attack paths to Domain Admin, and print
-the exact commands to run at every hop. No Neo4j, no GUI, no depth limit.
+Parse a BloodHound ZIP export, find attack paths to Domain Admin, triage
+domain-wide findings, and print the exact commands to run at every hop.
+No Neo4j, no GUI, no depth limit.
 
 ## Install
 
@@ -27,8 +28,10 @@ python3 pathdog.py -z <dump.zip> -u <user> [options]
 | `-k N` | Number of paths per user (default `3`). |
 | `-o BASENAME` | Output base name (default `pathdog_report`). |
 | `-f md \| html \| both` | Report format (default `html`). Pass `md` or `both` to also produce a Markdown report. |
-| `-l KIND` | List nodes and exit. `KIND` = `users`, `computers`, `groups`, `domains`, `gpos`, `ous`, `all`. |
+| `-l KIND` | List nodes and exit. `KIND` = `users`, `computers`, `groups`, `domains`, `gpos`, `ous`, `containers`, `certtemplates`, `enterprisecas`, `rootcas`, `aiacas`, `ntauthstores`, `all`. |
 | `-v` | Show graph statistics. |
+| `--triage` | Run global prioritized triage without requiring `-u`. |
+| `--export-json [FILE]` | Write a structured JSON report. Defaults to `<output>.json`. |
 | `--node NODE` | 360° visibility on a node, what it can reach (outbound) and who can reach it (inbound). No `-u` required. Combines with `-u` into a single HTML. |
 | `--no-fallback` | Disable intermediate-target suggestions. |
 | `--no-quickwins` | Disable the domain-wide quick-wins scan. |
@@ -55,6 +58,9 @@ python3 pathdog.py -z corp.zip -u alice@corp.local -t DC01.corp.local
 python3 pathdog.py -z corp.zip --list users
 python3 pathdog.py -z corp.zip --list all
 
+# Global triage without an owned user
+python3 pathdog.py -z corp.zip --triage --export-json
+
 # 360° visibility on a node, what it can reach and who can reach it
 python3 pathdog.py -z corp.zip --node svc_backup@corp.local
 
@@ -64,8 +70,8 @@ python3 pathdog.py -z corp.zip -u john.doe@corp.local --node svc_backup@corp.loc
 
 ## What you get
 
-For each owned user, Pathdog produces a console summary plus a Markdown and
-HTML report. The HTML report shows:
+For each owned user, Pathdog produces a console summary plus the requested
+Markdown and/or HTML report. The HTML report shows:
 
 - **One-line verdict** at the top, path found, no path but pivot available,
   or nothing actionable.
@@ -75,11 +81,46 @@ HTML report. The HTML report shows:
 - **Pivot candidates** when no direct path exists, principals that already
   have a path to the target and can be compromised out-of-band (Kerberoast,
   AS-REP roast, weak password, LAPS, unconstrained delegation).
+- **Prioritized findings** with severity, evidence, source, and commands
+  when the graph contains actionable attack edges or domain-wide quick wins.
 - **Domain-wide quick-wins** surfaced from BloodHound node properties:
   AS-REP roastables, Kerberoastables, unconstrained delegation, LAPS-
   deployed hosts, ADCS templates, password-not-required accounts, DCs.
 - **Identity tracking**, commands at each hop use the identity you have
   *right now*, not the node label in the graph.
+
+### Triage mode (`--triage`)
+
+Use `--triage` when you want a fast dump-wide view without declaring owned
+users. Pathdog builds normalized findings from quick wins and graph edges,
+then ranks them by severity. This is useful for first-pass review, report
+generation, or deciding which owned user to test next.
+
+```bash
+python3 pathdog.py -z corp.zip --triage -f both --export-json
+```
+
+The JSON export contains graph stats, findings, quick wins, pivots, owned
+results, path nodes/edges, weights, relations, and node-visibility data when
+`--node` is used.
+
+### ADCS / ESC coverage
+
+Pathdog understands BloodHound ADCS edges and produces Certipy-oriented
+commands for:
+
+- `ADCSESC1`, `ADCSESC3`, `ADCSESC4`
+- `ADCSESC6a`, `ADCSESC6b`
+- `ADCSESC9a`, `ADCSESC9b`
+- `ADCSESC10a`, `ADCSESC10b`
+- `ADCSESC13`
+- `GoldenCert`
+- supporting rights such as `Enroll`, `AutoEnroll`, `ManageCA`,
+  `ManageCertificates`, `DelegatedEnrollmentAgent`,
+  `WritePKINameFlag`, and `WritePKIEnrollmentFlag`
+
+ADCS object kinds such as certificate templates, enterprise CAs, root CAs,
+AIA CAs, and NTAuth stores are recognized when present in the dump.
 
 ### Node visibility (`--node`)
 
@@ -174,3 +215,5 @@ ANSI colors are emitted when stdout is a TTY (auto-disabled by `NO_COLOR=1`).
 - Pathdog synthesizes a `DCSync` edge when a principal holds both
   `GetChanges` and `GetChangesAll` on the same domain. Either right alone
   is deprioritized (it isn't exploitable without the pair).
+- Tests use small synthetic BloodHound ZIPs and run with the Python standard
+  library test runner: `python3 -m unittest discover -s tests`.

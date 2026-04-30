@@ -14,6 +14,7 @@ from .explanations import for_vector as _explain_vector
 if TYPE_CHECKING:
     import networkx as nx
 
+    from .findings import Finding
     from .pathfinder import PathResult
     from .quickwins import QuickWin
 
@@ -106,7 +107,10 @@ def _path_yields_dcsync(G: "nx.DiGraph", path: "PathResult") -> bool:
 
 # ── ANSI colors ───────────────────────────────────────────────────────────────
 
-_USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+_USE_COLOR = (
+    os.environ.get("NO_COLOR") is None
+    and (sys.stdout.isatty() or os.environ.get("FORCE_COLOR") == "1")
+)
 
 
 def _c(text: str, code: str) -> str:
@@ -121,6 +125,49 @@ def _yellow(s):  return _c(s, "33")
 def _blue(s):    return _c(s, "34")
 def _magenta(s): return _c(s, "35")
 def _cyan(s):    return _c(s, "36")
+def _gray(s):    return _c(s, "90")
+def _bright_red(s): return _c(s, "91")
+def _orange(s):  return _c(s, "38;5;208")
+
+
+def _severity(s: int | str) -> str:
+    label = f"[{s}]"
+    try:
+        value = int(s)
+    except (TypeError, ValueError):
+        return _yellow(label)
+    if value >= 10:
+        return _bold(_bright_red(label))
+    if value >= 9:
+        return _bright_red(label)
+    if value >= 8:
+        return _orange(label)
+    if value >= 6:
+        return _yellow(label)
+    return _blue(label)
+
+
+def _category(s: str) -> str:
+    base = s.lower()
+    if "adcs" in base or "dcsync" in base:
+        return _bold(_bright_red(s))
+    if "dangerous" in base or "unconstrained" in base or "password" in base:
+        return _orange(s)
+    if "roast" in base:
+        return _yellow(s)
+    if "high-value" in base:
+        return _magenta(s)
+    return _cyan(s)
+
+
+def _relation(s: str) -> str:
+    if s in ("DCSync", "ADCSESC1", "ADCSESC3", "ADCSESC4", "GoldenCert"):
+        return _bold(_bright_red(s))
+    if s in ("GenericAll", "WriteDacl", "WriteOwner", "Owns", "AllExtendedRights"):
+        return _orange(s)
+    if s in ("MemberOf", "Contains"):
+        return _gray(s)
+    return _yellow(s)
 
 
 def print_paths_console(
@@ -146,7 +193,7 @@ def print_paths_console(
     print()
     print(f"    {_cyan(src)}")
     for edge in best.edges:
-        rel = _yellow(f"[{edge['relation']}]")
+        rel = f"[{_relation(edge['relation'])}]"
         dst = _display_name(G, edge["dst"])
         dst_styled = _magenta(dst) if edge["dst"] == target else dst
         print(f"      {_dim('└─')}{rel}{_dim('──►')} {dst_styled}")
@@ -162,13 +209,13 @@ def print_paths_console(
         cmd, next_actor = _edge_commands(G, edge, actor)
         rel = edge["relation"]
         dst = _display_name(G, edge["dst"])
-        print(f"    {_bold(_blue(f'# Step {step}: {rel} on {dst}'))}  "
+        print(f"    {_bold(_blue(f'# Step {step}:'))} {_relation(rel)} on {_magenta(dst)}  "
               f"{_dim(f'(as {actor})')}")
         for c in cmd.commands or []:
             if c.startswith("#"):
                 print(f"      {_dim(c)}")
             else:
-                print(f"      {_green('$')} {c}")
+                print(f"      {_green('$')} {_cyan(c)}")
         if next_actor != actor:
             print(f"      {_magenta('→')} now operating as: {_cyan(next_actor)}")
         print()
@@ -207,7 +254,7 @@ def print_pivot_candidates(
     hops = ptd.hops if ptd else "?"
     vector = top["vectors"][0] if top["vectors"] else "out-of-band"
     print()
-    print(f"  {_yellow('◆')} {_bold('Best pivot:')} {_cyan(name)} "
+    print(f"  {_magenta('◆')} {_bold('Best pivot:')} {_cyan(name)} "
           f"{_dim(f'({vector}, {hops} hops onward)')}")
     if len(pivots) > 1:
         print(f"  {_dim(f'  +{len(pivots) - 1} more pivot candidate(s)  →  see HTML report')}")
@@ -222,11 +269,27 @@ def print_quickwins(
     if not quickwins:
         return
     print()
-    print(f"  {_yellow('◆')} {_bold('Domain quick-wins:')}")
+    print(f"  {_blue('◆')} {_bold('Domain quick-wins:')}")
     for cat in sorted(quickwins, key=lambda c: -len(quickwins[c])):
         items = quickwins[cat]
-        print(f"      {_yellow('•')} {cat} {_dim(f'({len(items)})')}")
+        print(f"      {_blue('•')} {_category(cat)} {_dim(f'({len(items)})')}")
     print(f"  {_dim('  full details + commands  →  see HTML report')}")
+
+
+def print_findings_console(findings: list["Finding"], limit: int = 10) -> None:
+    """Compact prioritized triage summary."""
+    if not findings:
+        return
+    print()
+    print(f"  {_bright_red('◆')} {_bold('Prioritized findings:')}")
+    for finding in findings[:limit]:
+        name = f" — {finding.node_name}" if finding.node_name else ""
+        print(
+            f"      {_gray('•')} {_severity(finding.severity)} "
+            f"{_category(finding.category)}: {_bold(finding.title)}{_dim(name)}"
+        )
+    if len(findings) > limit:
+        print(f"  {_dim(f'  +{len(findings) - limit} more finding(s)  →  see HTML/JSON report')}")
 
 
 # ── Markdown ──────────────────────────────────────────────────────────────────
@@ -240,6 +303,7 @@ def render_markdown(
     intermediate: list[dict] | None = None,
     quickwins: dict[str, list["QuickWin"]] | None = None,
     pivots: list[dict] | None = None,
+    findings: list["Finding"] | None = None,
 ) -> str:
     lines: list[str] = []
     lines.append("# Pathdog — Attack Path Report\n")
@@ -261,6 +325,8 @@ def render_markdown(
             lines.extend(_pivots_md(G, pivots))
         if quickwins:
             lines.extend(_quickwins_md(quickwins))
+        if findings:
+            lines.extend(_findings_md(findings))
         lines.append("\n---")
         lines.append("*Generated by [pathdog](https://github.com/dikabraxis/pathdog)*")
         return "\n".join(lines)
@@ -329,6 +395,8 @@ def render_markdown(
 
     if quickwins:
         lines.extend(_quickwins_md(quickwins))
+    if findings:
+        lines.extend(_findings_md(findings))
 
     lines.append("---")
     lines.append("*Generated by [pathdog](https://github.com/dikabraxis/pathdog)*")
@@ -379,6 +447,24 @@ def _quickwins_md(quickwins: dict[str, list["QuickWin"]]) -> list[str]:
     return lines
 
 
+def _findings_md(findings: list["Finding"]) -> list[str]:
+    def cell(value: object) -> str:
+        return str(value).replace("|", "\\|").replace("\n", " ")
+
+    lines = [
+        "\n## Prioritized findings\n",
+        "| Severity | Category | Finding | Evidence |",
+        "|----------|----------|---------|----------|",
+    ]
+    for finding in findings:
+        lines.append(
+            f"| {finding.severity} | {cell(finding.category)} | "
+            f"`{cell(finding.title)}` | {cell(finding.evidence)} |"
+        )
+    lines.append("")
+    return lines
+
+
 def _pivots_md(G: "nx.DiGraph", pivots: list[dict]) -> list[str]:
     if not pivots:
         return []
@@ -423,6 +509,7 @@ def render_markdown_multi(
     intermediates: dict[str, list[dict]] | None = None,
     quickwins: dict[str, list["QuickWin"]] | None = None,
     pivots: list[dict] | None = None,
+    findings: list["Finding"] | None = None,
 ) -> str:
     intermediates = intermediates or {}
     if len(results) == 1:
@@ -432,11 +519,19 @@ def render_markdown_multi(
             intermediate=intermediates.get(source),
             quickwins=quickwins,
             pivots=pivots,
+            findings=findings,
         )
 
     lines: list[str] = []
-    lines.append("# Pathdog — Multi-User Attack Path Report\n")
-    lines.append(f"**Target:** `{_display_name(G, target)}`\n")
+    if results:
+        lines.append("# Pathdog — Multi-User Attack Path Report\n")
+        lines.append(f"**Target:** `{_display_name(G, target)}`\n")
+    else:
+        lines.append("# Pathdog — Triage Report\n")
+        if target:
+            lines.append(f"**Target context:** `{_display_name(G, target)}`\n")
+        else:
+            lines.append("**Target context:** `global`\n")
     if stats:
         lines.extend(_stats_md_lines(stats))
 
@@ -458,6 +553,9 @@ def render_markdown_multi(
     if quickwins:
         lines.append("\n---\n")
         lines.extend(_quickwins_md(quickwins))
+    if findings:
+        lines.append("\n---\n")
+        lines.extend(_findings_md(findings))
 
     return "\n".join(lines)
 
@@ -502,6 +600,12 @@ def _kind_label(kind: str) -> str:
         "domains": "DOMAIN",
         "gpos": "GPO",
         "ous": "OU",
+        "containers": "CONTAINER",
+        "certtemplates": "CERTTPL",
+        "enterprisecas": "CA",
+        "rootcas": "ROOTCA",
+        "aiacas": "AIACA",
+        "ntauthstores": "NTAUTH",
     }.get(kind, "NODE")
 
 
@@ -1063,6 +1167,36 @@ def _quickwins_html(quickwins: dict[str, list["QuickWin"]]) -> str:
     )
 
 
+def _findings_html(findings: list["Finding"]) -> str:
+    if not findings:
+        return ""
+    rows = []
+    for finding in findings:
+        commands = ""
+        if finding.commands:
+            commands = (
+                '<details class="cmd-details">'
+                f'<summary>Commands ({len(finding.commands)})</summary>'
+                f'{_command_block(finding.commands, small=True, title="Commands")}'
+                '</details>'
+            )
+        rows.append(
+            '<div class="finding-row">'
+            f'<div class="finding-score sev-{finding.severity}">{finding.severity}</div>'
+            '<div class="finding-main">'
+            f'<div class="finding-title"><span class="rel-tag">{_escape(finding.category)}</span> '
+            f'{_escape(finding.title)}</div>'
+            f'<div class="finding-meta">{_kind_badge(finding.node_kind)} '
+            f'<code>{_escape(finding.node_name or finding.node_id)}</code> '
+            f'<span>confidence: {_escape(finding.confidence)}</span> '
+            f'<span>source: {_escape(finding.source)}</span></div>'
+            f'<div class="finding-evidence">{_escape(finding.evidence)}</div>'
+            f'{commands}'
+            '</div></div>'
+        )
+    return '<div class="findings-list">' + "".join(rows) + '</div>'
+
+
 def _slug(s: str) -> str:
     return "".join(c.lower() if c.isalnum() else "-" for c in s).strip("-")
 
@@ -1436,6 +1570,24 @@ _HTML_HEAD = """\
   .qw-more > summary { cursor: pointer; color: var(--primary); font-size: .78rem;
                        font-weight: 700; list-style: none; }
 
+  /* FINDINGS */
+  .findings-list { display: flex; flex-direction: column; gap: .65rem; }
+  .finding-row { display: grid; grid-template-columns: 42px minmax(0, 1fr);
+                 gap: .7rem; background: var(--card); border: 1px solid var(--border);
+                 border-radius: 6px; padding: .7rem .8rem; }
+  .finding-score { display: grid; place-items: center; align-self: start;
+                   width: 34px; height: 34px; border-radius: 50%;
+                   background: var(--soft); color: var(--text); font-weight: 800;
+                   border: 1px solid var(--border); }
+  .finding-score.sev-10, .finding-score.sev-9 { color: var(--danger); border-color: var(--danger); }
+  .finding-score.sev-8, .finding-score.sev-7 { color: var(--warn); border-color: var(--warn); }
+  .finding-title { font-weight: 700; color: var(--text); font-size: .9rem; }
+  .finding-meta { display: flex; flex-wrap: wrap; gap: .45rem; color: var(--muted);
+                  font-size: .76rem; margin-top: .25rem; }
+  .finding-meta code { background: var(--soft); padding: .1rem .35rem;
+                       border-radius: 3px; color: var(--text); }
+  .finding-evidence { color: var(--muted); font-size: .82rem; margin-top: .35rem; }
+
   /* DATA TABLE */
   .data-table { width: 100%; border-collapse: collapse; margin-top: .5rem; }
   .data-table th, .data-table td { padding: .45rem .75rem; text-align: left;
@@ -1541,6 +1693,7 @@ def render_html(
     intermediate: list[dict] | None = None,
     quickwins: dict[str, list["QuickWin"]] | None = None,
     pivots: list[dict] | None = None,
+    findings: list["Finding"] | None = None,
 ) -> str:
     src_name = _escape(_display_name(G, source))
     tgt_name = _escape(_display_name(G, target))
@@ -1553,6 +1706,8 @@ def render_html(
             nav_items.append(("More paths", "more-paths"))
     if pivots:
         nav_items.append(("Pivots", "pivots"))
+    if findings:
+        nav_items.append(("Findings", "findings"))
     if intermediate:
         nav_items.append(("Intermediate", "intermediate"))
     if quickwins:
@@ -1566,7 +1721,7 @@ def render_html(
         _sticky_nav_html(nav_items),
         _verdict_html(
             G, source, target, paths, pivots,
-            info_only=bool(intermediate or quickwins),
+            info_only=bool(intermediate or quickwins or findings),
         ),
     ]
 
@@ -1592,6 +1747,12 @@ def render_html(
             f'<details class="more-section" id="pivots" open>'
             f'<summary>Pivot candidates ({len(pivots)})</summary>'
             f'{_pivots_html(G, pivots)}</details>'
+        )
+    if findings:
+        body_parts.append(
+            f'<details class="more-section" id="findings" open>'
+            f'<summary>Prioritized findings ({len(findings)})</summary>'
+            f'{_findings_html(findings)}</details>'
         )
     if intermediate:
         body_parts.append(
@@ -2080,6 +2241,7 @@ def render_html_multi(
     intermediates: dict[str, list[dict]] | None = None,
     quickwins: dict[str, list["QuickWin"]] | None = None,
     pivots: list[dict] | None = None,
+    findings: list["Finding"] | None = None,
 ) -> str:
     intermediates = intermediates or {}
     if len(results) == 1:
@@ -2089,13 +2251,18 @@ def render_html_multi(
             intermediate=intermediates.get(source),
             quickwins=quickwins,
             pivots=pivots,
+            findings=findings,
         )
 
-    tgt_name = _escape(_display_name(G, target))
-    head = _HTML_HEAD.replace("{{TITLE_SUFFIX}}", "Multi-User Attack Path Report")
-    nav_items = [("Owned users", "owned-users")]
+    triage_only = not results
+    tgt_name = _escape(_display_name(G, target)) if target else "global"
+    title_suffix = "Triage Report" if triage_only else "Multi-User Attack Path Report"
+    head = _HTML_HEAD.replace("{{TITLE_SUFFIX}}", title_suffix)
+    nav_items = [] if triage_only else [("Owned users", "owned-users")]
     if pivots:
         nav_items.append(("Pivots", "pivots"))
+    if findings:
+        nav_items.append(("Findings", "findings"))
     if quickwins:
         nav_items.append(("Quick-wins", "quickwins"))
     if stats:
@@ -2103,11 +2270,16 @@ def render_html_multi(
 
     body_parts = [
         head,
-        f'<div class="title"><span class="brand">Pathdog</span> &nbsp;·&nbsp; '
-        f'target <code>{tgt_name}</code> &nbsp;·&nbsp; {len(results)} owned</div>',
+        '<div class="title"><span class="brand">Pathdog</span> &nbsp;·&nbsp; '
+        + (
+            f'triage report &nbsp;·&nbsp; context <code>{tgt_name}</code></div>'
+            if triage_only
+            else f'target <code>{tgt_name}</code> &nbsp;·&nbsp; {len(results)} owned</div>'
+        ),
         _sticky_nav_html(nav_items),
-        '<div id="owned-users"></div>',
     ]
+    if not triage_only:
+        body_parts.append('<div id="owned-users"></div>')
 
     # One block per user — best path visible, rest collapsed
     for source, paths in results:
@@ -2117,7 +2289,7 @@ def render_html_multi(
         body_parts.append(
             _verdict_html(
                 G, source, target, paths, pivots,
-                info_only=bool(intermediates.get(source) or quickwins),
+                info_only=bool(intermediates.get(source) or quickwins or findings),
             )
         )
         if paths:
@@ -2149,6 +2321,12 @@ def render_html_multi(
             f'<details class="more-section" id="pivots" open>'
             f'<summary>Pivot candidates ({len(pivots)})</summary>'
             f'{_pivots_html(G, pivots)}</details>'
+        )
+    if findings:
+        body_parts.append(
+            f'<details class="more-section" id="findings" open>'
+            f'<summary>Prioritized findings ({len(findings)})</summary>'
+            f'{_findings_html(findings)}</details>'
         )
     if quickwins:
         n = sum(len(v) for v in quickwins.values())
@@ -2186,6 +2364,7 @@ def render_html_combined(
     intermediates: dict | None = None,
     quickwins=None,
     pivots: list[dict] | None = None,
+    findings: list["Finding"] | None = None,
 ) -> str:
     """Single HTML combining -u (attack paths) and --node (visibility) sections.
 
@@ -2198,7 +2377,7 @@ def render_html_combined(
     node_overlaps_u = any(source == node_id for source, _ in results)
 
     attack_html = render_html_multi(
-        results, G, target, stats, intermediates, quickwins, pivots,
+        results, G, target, stats, intermediates, quickwins, pivots, findings,
     )
     attack_body = _html_body_only(attack_html)
 
