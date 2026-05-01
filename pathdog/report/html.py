@@ -1197,10 +1197,12 @@ def render_html_combined(
 
     head = _HTML_HEAD.replace("{{TITLE_SUFFIX}}", _escape(f"Combined — {_display_name(G, node_id)}"))
 
+    first_section_title = "Attack Paths" if results else "Triage"
+    first_section_meta = "-u" if results else "--triage"
     attack_banner = (
         '<div class="section-banner attack">'
-        '<span class="banner-title">Attack Paths</span>'
-        '<span class="banner-meta">-u</span>'
+        f'<span class="banner-title">{first_section_title}</span>'
+        f'<span class="banner-meta">{first_section_meta}</span>'
         '</div>'
     )
 

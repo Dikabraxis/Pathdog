@@ -193,6 +193,71 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(data["node_visibility"]["node"]["id"], "U1")
             self.assertTrue(data["node_visibility"]["outbound_paths"])
 
+    def test_cli_owned_user_does_not_include_triage_by_default(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            zpath = write_bh_zip(
+                tmp_path / "owned.zip",
+                base_files(extra_rels=[
+                    {"StartNode": "U1", "EndNode": "DA", "RelationshipType": "GenericAll"},
+                ]),
+            )
+            json_path = tmp_path / "owned.json"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "pathdog.py",
+                    "-z",
+                    str(zpath),
+                    "-u",
+                    "alice@corp.local",
+                    "--export-json",
+                    str(json_path),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+            data = json.loads(json_path.read_text())
+            self.assertTrue(data["owned_results"][0]["paths"])
+            self.assertEqual(data["findings"], [])
+            self.assertEqual(data["quickwins"], {})
+
+    def test_cli_owned_user_with_triage_includes_findings(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            zpath = write_bh_zip(
+                tmp_path / "owned_triage.zip",
+                base_files(extra_rels=[
+                    {"StartNode": "U1", "EndNode": "DA", "RelationshipType": "GenericAll"},
+                ]),
+            )
+            json_path = tmp_path / "owned_triage.json"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "pathdog.py",
+                    "-z",
+                    str(zpath),
+                    "-u",
+                    "alice@corp.local",
+                    "--triage",
+                    "--export-json",
+                    str(json_path),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+            data = json.loads(json_path.read_text())
+            self.assertTrue(data["owned_results"][0]["paths"])
+            self.assertTrue(data["findings"])
+            self.assertTrue(data["quickwins"])
+
     def test_every_weighted_relation_has_command_guidance(self):
         structural = {"MemberOf", "Contains"}
         for rel in EDGE_WEIGHTS:

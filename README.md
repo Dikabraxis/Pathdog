@@ -33,7 +33,7 @@ python3 pathdog.py -z <dump.zip> -u <user> [options]
 | `-f md \| html \| both` | Report format (default `html`). Pass `md` or `both` to also produce a Markdown report. |
 | `-l KIND` | List nodes and exit. Omit `KIND` to list all nodes. `KIND` = `users`, `computers`, `groups`, `domains`, `gpos`, `ous`, `containers`, `certtemplates`, `enterprisecas`, `rootcas`, `aiacas`, `ntauthstores`, `all`. |
 | `-v` | Show graph statistics. |
-| `--triage` | Run global prioritized triage without requiring `-u`. |
+| `--triage` | Add global prioritized triage. Can run alone or combine with `-u` / `--node`. |
 | `--export-json [FILE]` | Write a structured JSON report. Defaults to `<output>.json`. |
 | `--node NODE` | 360° visibility on a node, what it can reach (outbound) and who can reach it (inbound). No `-u` required. Combines with `-u` into a single HTML. |
 | `--no-fallback` | Disable intermediate-target suggestions. |
@@ -69,12 +69,18 @@ python3 pathdog.py -z corp.zip --node svc_backup@corp.local
 
 # Combine -u and --node, single HTML with both sections
 python3 pathdog.py -z corp.zip -u john.doe@corp.local --node svc_backup@corp.local -f html
+
+# Add triage only when you want dump-wide findings in the same report
+python3 pathdog.py -z corp.zip -u john.doe@corp.local --triage -f html
+python3 pathdog.py -z corp.zip --node svc_backup@corp.local --triage -f html
 ```
 
 ## What you get
 
 For each owned user, Pathdog produces a console summary plus the requested
-Markdown and/or HTML report. The HTML report shows:
+Markdown and/or HTML report. Plain `-u` reports stay focused on owned-user
+paths; dump-wide triage sections appear only when `--triage` is also present.
+The HTML report shows:
 
 - **One-line verdict** at the top, path found, no path but pivot available,
   or nothing actionable.
@@ -85,8 +91,10 @@ Markdown and/or HTML report. The HTML report shows:
   have a path to the target and can be compromised out-of-band (Kerberoast,
   AS-REP roast, weak password, LAPS, unconstrained delegation).
 - **Prioritized findings** with severity, evidence, source, and commands
-  when the graph contains actionable attack edges or domain-wide quick wins.
-- **Domain-wide quick-wins** surfaced from BloodHound node properties:
+  when `--triage` is requested and the graph contains actionable attack edges
+  or domain-wide quick wins.
+- **Domain-wide quick-wins** when `--triage` is requested, surfaced from
+  BloodHound node properties:
   AS-REP roastables, Kerberoastables, unconstrained delegation, LAPS-
   deployed hosts, ADCS templates, password-not-required accounts, DCs.
 - **Identity tracking**, commands at each hop use the identity you have
@@ -176,9 +184,10 @@ Admins. The HTML report contains:
 - **Inbound object control** (collapsible), principals with direct
   privileges over this node.
 
-Standalone `--node` reports stay focused on node visibility. Use `--triage`
-for domain-wide findings and quick-wins, or combine `-u` with `--node` when
-you want attack paths, global findings, and node visibility in one HTML report.
+Standalone `--node` reports stay focused on node visibility. Add `--triage`
+when you also want domain-wide findings and quick-wins in the same report, or
+combine `-u` with `--node` when you want attack paths and node visibility
+together.
 
 When you pass both `-u` and `--node`, Pathdog produces a single combined
 HTML with the `-u` section on top (green banner) and the `--node` section

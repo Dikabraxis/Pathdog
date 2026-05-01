@@ -292,6 +292,88 @@ def _do_node_visibility(G, args) -> int:
     return 0
 
 
+def _collect_triage_data(G, args) -> dict:
+    """Collect global triage data without deciding how it is rendered."""
+    target = resolve_target(G, args.target)
+    if target:
+        print(f"[*] Triage target context: {target}")
+        pruned = prune_to_target(G, target)
+        stats = graph_stats(G, pruned)
+    else:
+        target = args.target or ""
+        stats = {
+            "total_nodes": G.number_of_nodes(),
+            "total_edges": G.number_of_edges(),
+            "pruned_nodes": G.number_of_nodes(),
+            "pruned_edges": G.number_of_edges(),
+            "reduction_pct": 0.0,
+        }
+        if args.target:
+            print(f"[!] Target '{args.target}' not found — triage will still run.",
+                  file=sys.stderr)
+
+    print("[*] Running global triage ...")
+    quickwins = {} if args.no_quickwins else collect_quickwins(G)
+    findings = collect_findings(G, quickwins=quickwins)
+
+    if findings:
+        print(f"[*] Findings: {len(findings)} prioritized item(s)")
+        print_findings_console(findings)
+    if quickwins:
+        total = sum(len(v) for v in quickwins.values())
+        print(f"[*] Quick wins: {total} finding(s) across {len(quickwins)} categor(ies)")
+        print_quickwins(G, quickwins)
+
+    return {
+        "target": target,
+        "stats": stats,
+        "quickwins": quickwins,
+        "findings": findings,
+    }
+
+
+def _write_standalone_triage_report(G, args, triage_data: dict) -> tuple[list[str], str]:
+    """Write a triage-only report and return (written_paths, base)."""
+    written: list[str] = []
+    base = args.output
+    extensions = [e for e in (".md", ".html") if args.fmt in (e[1:], "both")]
+    if any(os.path.exists(f"{base}{ext}") for ext in extensions):
+        base = f"{base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    report_stats = triage_data["stats"] if args.verbose else None
+    target = triage_data["target"]
+    quickwins = triage_data["quickwins"]
+    findings = triage_data["findings"]
+
+    if args.fmt in ("md", "both"):
+        md_path = f"{base}.md"
+        with open(md_path, "w", encoding="utf-8") as fh:
+            fh.write(render_markdown_multi(
+                [], G, target, report_stats,
+                quickwins=quickwins, findings=findings,
+            ))
+        written.append(md_path)
+
+    if args.fmt in ("html", "both"):
+        html_path = f"{base}.html"
+        with open(html_path, "w", encoding="utf-8") as fh:
+            fh.write(render_html_multi(
+                [], G, target, report_stats,
+                quickwins=quickwins, findings=findings,
+            ))
+        written.append(html_path)
+
+    json_path = _json_path(args, base)
+    if json_path:
+        write_json_report(json_path, build_json_report(
+            G=G, target=target, results=[], stats=triage_data["stats"],
+            quickwins=quickwins, findings=findings,
+        ))
+        written.append(json_path)
+
+    return written, base
+
+
 def _json_path(args, base: str) -> str | None:
     """Return JSON output path, or None when JSON export is disabled."""
     if args.export_json is None:
@@ -318,74 +400,18 @@ def main() -> int:
         _do_list(G, args.list_kind)
         return 0
 
-    # ── --triage mode (no -u required) ───────────────────────────────────────
-    if args.triage:
-        target = resolve_target(G, args.target)
-        if target:
-            print(f"[*] Triage target context: {target}")
-            pruned = prune_to_target(G, target)
-            stats = graph_stats(G, pruned)
-        else:
-            target = args.target or ""
-            stats = {
-                "total_nodes": G.number_of_nodes(),
-                "total_edges": G.number_of_edges(),
-                "pruned_nodes": G.number_of_nodes(),
-                "pruned_edges": G.number_of_edges(),
-                "reduction_pct": 0.0,
-            }
-            if args.target:
-                print(f"[!] Target '{args.target}' not found — triage will still run.",
-                      file=sys.stderr)
-
-        quickwins = {} if args.no_quickwins else collect_quickwins(G)
-        findings = collect_findings(G, quickwins=quickwins)
-
-        if findings:
-            print_findings_console(findings)
-        if quickwins:
-            print_quickwins(G, quickwins)
-
-        written: list[str] = []
-        base = args.output
-        extensions = [e for e in (".md", ".html") if args.fmt in (e[1:], "both")]
-        if any(os.path.exists(f"{base}{ext}") for ext in extensions):
-            base = f"{base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-        if args.fmt in ("md", "both"):
-            md_path = f"{base}.md"
-            with open(md_path, "w", encoding="utf-8") as fh:
-                fh.write(render_markdown_multi(
-                    [], G, target, stats if args.verbose else None,
-                    quickwins=quickwins, findings=findings,
-                ))
-            written.append(md_path)
-
-        if args.fmt in ("html", "both"):
-            html_path = f"{base}.html"
-            with open(html_path, "w", encoding="utf-8") as fh:
-                fh.write(render_html_multi(
-                    [], G, target, stats if args.verbose else None,
-                    quickwins=quickwins, findings=findings,
-                ))
-            written.append(html_path)
-
-        json_path = _json_path(args, base)
-        if json_path:
-            write_json_report(json_path, build_json_report(
-                G=G, target=target, results=[], stats=stats,
-                quickwins=quickwins, findings=findings,
-            ))
-            written.append(json_path)
-
+    # ── --triage can run standalone or be combined with -u / --node ──────────
+    triage_data = _collect_triage_data(G, args) if args.triage else None
+    if args.triage and not args.users and not args.node:
+        written, _ = _write_standalone_triage_report(G, args, triage_data)
         if written:
             print(f"\n[+] Report(s) written: {', '.join(written)}")
-        return 0 if findings or quickwins else 2
+        return 0 if triage_data["findings"] or triage_data["quickwins"] else 2
 
     # ── --node mode: collect data (standalone) or store for combined report ────
     node_data = None
     if args.node:
-        if not args.users:
+        if not args.users and not args.triage:
             return _do_node_visibility(G, args)
         node_data = _collect_node_data(G, args)
         if node_data:
@@ -399,7 +425,55 @@ def main() -> int:
 
     # ── Validate -u is provided for path-finding ──────────────────────────────
     if not args.users:
-        parser.error("argument -u/--user is required unless --list or --node is used")
+        if args.triage and node_data:
+            written: list[str] = []
+            base = args.output
+            extensions = [e for e in (".md", ".html") if args.fmt in (e[1:], "both")]
+            if any(os.path.exists(f"{base}{ext}") for ext in extensions):
+                base = f"{base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+            report_stats = triage_data["stats"] if args.verbose else None
+            target = triage_data["target"]
+            quickwins = triage_data["quickwins"]
+            findings = triage_data["findings"]
+
+            if args.fmt in ("md", "both"):
+                md_path = f"{base}.md"
+                with open(md_path, "w", encoding="utf-8") as fh:
+                    fh.write(render_markdown_multi(
+                        [], G, target, report_stats,
+                        quickwins=quickwins, findings=findings,
+                    ))
+                    fh.write("\n\n---\n\n")
+                    fh.write(render_markdown_node_visibility(
+                        G, node_data["node_id"], node_data["target"],
+                        node_data["outbound_paths"], node_data["outbound_intermediate"],
+                        node_data["inbound_sources"], node_data["stats"],
+                        node_data["outbound_control"], node_data["inbound_control"],
+                    ))
+                written.append(md_path)
+
+            if args.fmt in ("html", "both"):
+                html_path = f"{base}.html"
+                with open(html_path, "w", encoding="utf-8") as fh:
+                    fh.write(render_html_combined(
+                        [], G, target, node_data, report_stats,
+                        quickwins=quickwins, findings=findings,
+                    ))
+                written.append(html_path)
+
+            json_path = _json_path(args, base)
+            if json_path:
+                write_json_report(json_path, build_json_report(
+                    G=G, target=target, results=[], stats=triage_data["stats"],
+                    quickwins=quickwins, findings=findings, node_data=node_data,
+                ))
+                written.append(json_path)
+
+            if written:
+                print(f"\n[+] Report(s) written: {', '.join(written)}")
+            return 0 if findings or quickwins or node_data else 2
+        parser.error("argument -u/--user is required unless --list, --triage, or --node is used")
 
     # ── Expand user list ──────────────────────────────────────────────────────
     users, rc = _expand_users(args.users)
@@ -488,19 +562,9 @@ def main() -> int:
             )
         all_results.append((source, paths))
 
-    # ── Quick wins (domain-wide, computed once) ───────────────────────────────
-    quickwins = None
-    if not args.no_quickwins:
-        print("[*] Scanning domain-wide quick wins ...")
-        quickwins = collect_quickwins(G)
-        if quickwins:
-            total = sum(len(v) for v in quickwins.values())
-            print(f"[*] Quick wins: {total} finding(s) across {len(quickwins)} categor(ies)")
-
-    print("[*] Building prioritized findings ...")
-    findings = collect_findings(G, quickwins=quickwins or {})
-    if findings:
-        print(f"[*] Findings: {len(findings)} prioritized item(s)")
+    # ── Triage is opt-in for attack-path mode ────────────────────────────────
+    quickwins = triage_data["quickwins"] if triage_data else None
+    findings = triage_data["findings"] if triage_data else []
 
     # ── Pivot candidates (principals in DA-subgraph attackable out-of-band) ───
     pivots: list[dict] = []
@@ -528,10 +592,10 @@ def main() -> int:
     if pivots:
         print_pivot_candidates(G, pivots)
 
-    if findings:
+    if triage_data and findings:
         print_findings_console(findings)
 
-    if quickwins:
+    if triage_data and quickwins:
         print_quickwins(G, quickwins)
 
     # ── Write reports ─────────────────────────────────────────────────────────
@@ -548,8 +612,8 @@ def main() -> int:
         with open(md_path, "w", encoding="utf-8") as fh:
             fh.write(render_markdown_multi(
                 all_results, G, target, report_stats,
-                intermediates=intermediates, quickwins=quickwins, pivots=pivots,
-                findings=findings,
+                intermediates=intermediates, quickwins=quickwins if triage_data else None,
+                pivots=pivots, findings=findings if triage_data else None,
             ))
         written.append(md_path)
 
@@ -559,14 +623,18 @@ def main() -> int:
             if node_data:
                 fh.write(render_html_combined(
                     all_results, G, target, node_data, report_stats,
-                    intermediates=intermediates, quickwins=quickwins, pivots=pivots,
-                    findings=findings,
+                    intermediates=intermediates,
+                    quickwins=quickwins if triage_data else None,
+                    pivots=pivots,
+                    findings=findings if triage_data else None,
                 ))
             else:
                 fh.write(render_html_multi(
                     all_results, G, target, report_stats,
-                    intermediates=intermediates, quickwins=quickwins, pivots=pivots,
-                    findings=findings,
+                    intermediates=intermediates,
+                    quickwins=quickwins if triage_data else None,
+                    pivots=pivots,
+                    findings=findings if triage_data else None,
                 ))
         written.append(html_path)
 
@@ -574,8 +642,11 @@ def main() -> int:
     if json_path:
         write_json_report(json_path, build_json_report(
             G=G, target=target, results=all_results, stats=stats,
-            intermediates=intermediates, quickwins=quickwins, pivots=pivots,
-            findings=findings, node_data=node_data,
+            intermediates=intermediates,
+            quickwins=quickwins if triage_data else None,
+            pivots=pivots,
+            findings=findings if triage_data else None,
+            node_data=node_data,
         ))
         written.append(json_path)
 
