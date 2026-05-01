@@ -314,6 +314,53 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(data["findings"])
             self.assertTrue(data["quickwins"])
 
+    def test_triage_suppresses_expected_tier0_admin_acl_noise(self):
+        nodes = [
+            {"id": "ADMINS", "kind": "groups", "props": {"name": "ADMINISTRATORS@corp.local", "highvalue": True}},
+            {"id": "D1", "kind": "domains", "props": {"name": "corp.local", "highvalue": True}},
+        ]
+        edges = [
+            {"src": "ADMINS", "dst": "D1", "type": rel}
+            for rel in ("AllExtendedRights", "Owns", "WriteDacl", "WriteOwner")
+        ]
+        G = build_graph(nodes, edges)
+        findings = collect_findings(G, quickwins={})
+        self.assertFalse(any(f.category == "Dangerous ACL" for f in findings))
+
+    def test_triage_suppresses_expected_tier0_admin_dcsync_noise(self):
+        nodes = [
+            {"id": "ADMINS", "kind": "groups", "props": {"name": "ADMINISTRATORS@corp.local", "highvalue": True}},
+            {"id": "ETHAN", "kind": "users", "props": {"name": "ethan@corp.local"}},
+            {"id": "D1", "kind": "domains", "props": {"name": "corp.local", "highvalue": True}},
+        ]
+        edges = [
+            {"src": "ADMINS", "dst": "D1", "type": "GetChanges"},
+            {"src": "ADMINS", "dst": "D1", "type": "GetChangesAll"},
+            {"src": "ETHAN", "dst": "D1", "type": "GetChanges"},
+            {"src": "ETHAN", "dst": "D1", "type": "GetChangesAll"},
+        ]
+        G = build_graph(nodes, edges)
+        findings = [f for f in collect_findings(G, quickwins={}) if f.category == "DCSync"]
+        self.assertEqual(len(findings), 1)
+        self.assertIn("ethan@corp.local", findings[0].title)
+
+    def test_triage_aggregates_multiple_dangerous_acls_per_pair(self):
+        nodes = [
+            {"id": "HELPDESK", "kind": "groups", "props": {"name": "HELPDESK@corp.local"}},
+            {"id": "DA", "kind": "groups", "props": {"name": "DOMAIN ADMINS@corp.local", "highvalue": True}},
+        ]
+        edges = [
+            {"src": "HELPDESK", "dst": "DA", "type": rel}
+            for rel in ("WriteDacl", "WriteOwner", "AllExtendedRights")
+        ]
+        G = build_graph(nodes, edges)
+        findings = [f for f in collect_findings(G, quickwins={}) if f.category == "Dangerous ACL"]
+        self.assertEqual(len(findings), 1)
+        self.assertIn("3 control rights", findings[0].title)
+        self.assertIn("WriteDacl", findings[0].evidence)
+        self.assertIn("WriteOwner", findings[0].evidence)
+        self.assertIn("AllExtendedRights", findings[0].evidence)
+
     def test_every_weighted_relation_has_command_guidance(self):
         structural = {"MemberOf", "Contains"}
         for rel in EDGE_WEIGHTS:

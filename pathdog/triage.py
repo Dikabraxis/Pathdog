@@ -35,6 +35,34 @@ DANGEROUS_RELATIONS = {
     "ManageCertificates", "DelegatedEnrollmentAgent", "WriteGPLink",
 }
 
+EXPECTED_TIER0_ADMIN_GROUPS = {
+    "administrators",
+    "domain admins",
+    "enterprise admins",
+    "schema admins",
+}
+
+DANGEROUS_RELATION_PRIORITY = {
+    "GenericAll": 0,
+    "WriteDacl": 1,
+    "WriteOwner": 2,
+    "Owns": 3,
+    "AllExtendedRights": 4,
+    "GenericWrite": 5,
+    "AddKeyCredentialLink": 6,
+    "ForceChangePassword": 7,
+    "AddMember": 8,
+    "AddSelf": 9,
+    "AllowedToAct": 10,
+    "WriteAccountRestrictions": 11,
+    "ManageCA": 12,
+    "ManageCertificates": 13,
+    "DelegatedEnrollmentAgent": 14,
+    "WriteGPLink": 15,
+    "ReadLAPSPassword": 16,
+    "SyncLAPSPassword": 17,
+}
+
 
 def _display_name(G, nid: str) -> str:
     if nid in G:
@@ -62,6 +90,32 @@ def _is_high_value(G, nid: str) -> bool:
     )
 
 
+def _principal_base_name(G, nid: str) -> str:
+    name = _display_name(G, nid).lower()
+    if "\\" in name:
+        name = name.rsplit("\\", 1)[1]
+    if "@" in name:
+        name = name.split("@", 1)[0]
+    return " ".join(name.split())
+
+
+def _is_expected_tier0_admin_control(G, src: str, dst: str) -> bool:
+    """True for default admin groups controlling default tier-0 objects.
+
+    These edges are real and must stay in the graph, but as triage findings
+    they are usually baseline privileges rather than actionable weaknesses.
+    """
+    if _kind(G, src) != "groups":
+        return False
+    if _principal_base_name(G, src) not in EXPECTED_TIER0_ADMIN_GROUPS:
+        return False
+    return _is_high_value(G, dst)
+
+
+def _dangerous_relation_sort_key(rel: str) -> tuple[int, str]:
+    return DANGEROUS_RELATION_PRIORITY.get(rel, 100), rel
+
+
 def _commands_for_edge(G, src: str, dst: str, rel: str) -> list[str]:
     cmd, _ = get_commands(
         rel_type=rel,
@@ -85,6 +139,7 @@ def collect_findings(G, *, quickwins: dict | None = None, limit: int | None = No
     quickwins = quickwins if quickwins is not None else collect_all(G)
     findings: list[Finding] = []
     seen: set[tuple] = set()
+    dangerous_by_pair: dict[tuple[str, str], set[str]] = {}
 
     for category, items in quickwins.items():
         # ADCS quickwins come from graph edges too; keep the graph-sourced
@@ -118,6 +173,8 @@ def collect_findings(G, *, quickwins: dict | None = None, limit: int | None = No
             dst_name = _display_name(G, dst)
 
             if rel == "DCSync":
+                if _is_expected_tier0_admin_control(G, src, dst):
+                    continue
                 key = ("dcsync", src, dst)
                 if key not in seen:
                     seen.add(key)
@@ -149,21 +206,37 @@ def collect_findings(G, *, quickwins: dict | None = None, limit: int | None = No
                         source="graph",
                     ))
 
-            if rel in DANGEROUS_RELATIONS and _is_high_value(G, dst):
-                key = ("dangerous-acl", rel, src, dst)
-                if key not in seen:
-                    seen.add(key)
-                    findings.append(Finding(
-                        severity=9,
-                        category="Dangerous ACL",
-                        title=f"{src_name} has {rel} on high-value {dst_name}",
-                        node_id=dst,
-                        node_name=dst_name,
-                        node_kind=_kind(G, dst),
-                        evidence=f"{rel} from {src_name} to high-value target {dst_name}.",
-                        commands=_commands_for_edge(G, src, dst, rel),
-                        source="graph",
-                    ))
+            if (
+                rel in DANGEROUS_RELATIONS
+                and _is_high_value(G, dst)
+                and not _is_expected_tier0_admin_control(G, src, dst)
+            ):
+                dangerous_by_pair.setdefault((src, dst), set()).add(rel)
+
+    for (src, dst), rels in dangerous_by_pair.items():
+        ordered_rels = sorted(rels, key=_dangerous_relation_sort_key)
+        rel_label = ", ".join(ordered_rels)
+        src_name = _display_name(G, src)
+        dst_name = _display_name(G, dst)
+        key = ("dangerous-acl", src, dst, tuple(ordered_rels))
+        if key in seen:
+            continue
+        seen.add(key)
+        if len(ordered_rels) == 1:
+            title = f"{src_name} has {ordered_rels[0]} on high-value {dst_name}"
+        else:
+            title = f"{src_name} has {len(ordered_rels)} control rights on high-value {dst_name}"
+        findings.append(Finding(
+            severity=9,
+            category="Dangerous ACL",
+            title=title,
+            node_id=dst,
+            node_name=dst_name,
+            node_kind=_kind(G, dst),
+            evidence=f"{rel_label} from {src_name} to high-value target {dst_name}.",
+            commands=_commands_for_edge(G, src, dst, ordered_rels[0]),
+            source="graph",
+        ))
 
     findings.sort(key=lambda f: (-f.severity, f.category, f.node_name, f.title))
     if limit is not None:
