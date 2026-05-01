@@ -7,6 +7,7 @@ public renderer API used by the CLI is re-exported here.
 from .console import (
     print_findings_console,
     print_intermediate_targets,
+    print_owned_object_control,
     print_node_visibility_console,
     print_paths_console,
     print_pivot_candidates,
@@ -27,6 +28,7 @@ from .markdown import (
 __all__ = [
     "print_findings_console",
     "print_intermediate_targets",
+    "print_owned_object_control",
     "print_node_visibility_console",
     "print_paths_console",
     "print_pivot_candidates",

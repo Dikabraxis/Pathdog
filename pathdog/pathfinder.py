@@ -378,7 +378,25 @@ def find_outbound_object_control(
         for _, dst in G.out_edges(grp_id):
             _emit(grp_id, dst, grp_name)
 
-    results.sort(key=lambda x: (x["via_group"] is not None, x["relation"]))
+    priority = {
+        "GenericAll": 0,
+        "WriteDacl": 1,
+        "WriteOwner": 2,
+        "Owns": 3,
+        "AllExtendedRights": 4,
+        "GenericWrite": 5,
+        "AddKeyCredentialLink": 6,
+        "ForceChangePassword": 7,
+        "AdminTo": 8,
+        "CanPSRemote": 9,
+        "CanRDP": 10,
+        "ExecuteDCOM": 11,
+    }
+    results.sort(key=lambda x: (
+        x["via_group"] is not None,
+        priority.get(x["relation"], 50),
+        x["relation"],
+    ))
     return results
 
 

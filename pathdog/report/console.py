@@ -151,6 +151,25 @@ def print_intermediate_targets(
     print(f"  {_dim('  ' + str(len(suggestions)) + ' intermediate target(s) reachable  →  see HTML report')}")
 
 
+def print_owned_object_control(
+    G: "nx.DiGraph",
+    controls: list[dict],
+) -> None:
+    """Compact owned-user object-control summary for attack-path mode."""
+    if not controls:
+        return
+    direct = [e for e in controls if e["via_group"] is None]
+    indirect = [e for e in controls if e["via_group"] is not None]
+    print(f"  {_yellow('→')} {_bold('Object control:')} "
+          f"{_dim(f'{len(direct)} direct, {len(indirect)} via group(s)')}")
+    for entry in controls[:3]:
+        dst = _display_name(G, entry["dst"])
+        via = f" via {entry['via_group']}" if entry["via_group"] else ""
+        print(f"      {_yellow('•')} {_relation(entry['relation'])} on {_cyan(dst)}{_dim(via)}")
+    if len(controls) > 3:
+        print(f"      {_dim(f'+{len(controls) - 3} more privilege(s)  →  see HTML report')}")
+
+
 def print_pivot_candidates(
     G: "nx.DiGraph",
     pivots: list[dict],

@@ -117,6 +117,17 @@ def _node_visibility_to_dict(G: "nx.DiGraph", node_data: dict | None) -> dict | 
     }
 
 
+def _outbound_control_to_dict(G: "nx.DiGraph", controls: list[dict]) -> list[dict]:
+    return [
+        {
+            "dst": _node_ref(G, item["dst"]),
+            "relation": item["relation"],
+            "via_group": item["via_group"],
+        }
+        for item in controls
+    ]
+
+
 def build_json_report(
     *,
     G: "nx.DiGraph",
@@ -124,6 +135,7 @@ def build_json_report(
     results: list[tuple[str, list["PathResult"]]] | None = None,
     stats: dict | None = None,
     intermediates: dict[str, list[dict]] | None = None,
+    outbound_controls: dict[str, list[dict]] | None = None,
     quickwins: dict[str, list["QuickWin"]] | None = None,
     pivots: list[dict] | None = None,
     findings: list["Finding"] | None = None,
@@ -131,6 +143,7 @@ def build_json_report(
 ) -> dict:
     results = results or []
     intermediates = intermediates or {}
+    outbound_controls = outbound_controls or {}
     pivots = pivots or []
     findings = findings or []
 
@@ -153,6 +166,9 @@ def build_json_report(
                     "kind": G.nodes[source].get("kind", "") if source in G else "",
                 },
                 "paths": [_path_to_dict(G, path) for path in paths],
+                "outbound_control": _outbound_control_to_dict(
+                    G, outbound_controls.get(source, [])
+                ),
                 "intermediate_targets": [
                     {
                         "node": item["node"],

@@ -684,12 +684,14 @@ def render_html(
     target: str,
     stats: dict | None = None,
     intermediate: list[dict] | None = None,
+    outbound_control: list[dict] | None = None,
     quickwins: dict[str, list["QuickWin"]] | None = None,
     pivots: list[dict] | None = None,
     findings: list["Finding"] | None = None,
 ) -> str:
     src_name = _escape(_display_name(G, source))
     tgt_name = _escape(_display_name(G, target))
+    outbound_control = outbound_control or []
 
     head = _HTML_HEAD.replace("{{TITLE_SUFFIX}}", "Attack Path Report")
     nav_items = [("Verdict", "verdict")]
@@ -703,6 +705,8 @@ def render_html(
         nav_items.append(("Findings", "findings"))
     if intermediate:
         nav_items.append(("Intermediate", "intermediate"))
+    if outbound_control:
+        nav_items.append(("Object control", "outbound-control"))
     if quickwins:
         nav_items.append(("Quick-wins", "quickwins"))
     if stats:
@@ -714,7 +718,7 @@ def render_html(
         _sticky_nav_html(nav_items),
         _verdict_html(
             G, source, target, paths, pivots,
-            info_only=bool(intermediate or quickwins or findings),
+            info_only=bool(intermediate or outbound_control or quickwins or findings),
         ),
     ]
 
@@ -752,6 +756,15 @@ def render_html(
             f'<details class="more-section" id="intermediate" open>'
             f'<summary>Intermediate targets ({len(intermediate)})</summary>'
             f'{_intermediate_html(G, source, intermediate)}</details>'
+        )
+    if outbound_control:
+        direct_count = sum(1 for e in outbound_control if e["via_group"] is None)
+        indirect_count = len(outbound_control) - direct_count
+        body_parts.append(
+            f'<details class="more-section" id="outbound-control" open>'
+            f'<summary>Outbound Object Control ({direct_count} direct · {indirect_count} via group)'
+            f' — objects this owned principal has privileges over</summary>'
+            f'{_object_control_out_html(G, outbound_control)}</details>'
         )
     if quickwins:
         n = sum(len(v) for v in quickwins.values())
@@ -1015,16 +1028,19 @@ def render_html_multi(
     target: str,
     stats: dict | None = None,
     intermediates: dict[str, list[dict]] | None = None,
+    outbound_controls: dict[str, list[dict]] | None = None,
     quickwins: dict[str, list["QuickWin"]] | None = None,
     pivots: list[dict] | None = None,
     findings: list["Finding"] | None = None,
 ) -> str:
     intermediates = intermediates or {}
+    outbound_controls = outbound_controls or {}
     if len(results) == 1:
         source, paths = results[0]
         return render_html(
             paths, G, source, target, stats,
             intermediate=intermediates.get(source),
+            outbound_control=outbound_controls.get(source),
             quickwins=quickwins,
             pivots=pivots,
             findings=findings,
@@ -1065,7 +1081,10 @@ def render_html_multi(
         body_parts.append(
             _verdict_html(
                 G, source, target, paths, pivots,
-                info_only=bool(intermediates.get(source) or quickwins or findings),
+                info_only=bool(
+                    intermediates.get(source) or outbound_controls.get(source)
+                    or quickwins or findings
+                ),
             )
         )
         if paths:
@@ -1089,6 +1108,16 @@ def render_html_multi(
                     f'<summary>Intermediate targets ({len(inter)})</summary>'
                     f'{_intermediate_html(G, source, inter)}</details>'
                 )
+        controls = outbound_controls.get(source) or []
+        if controls:
+            direct_count = sum(1 for e in controls if e["via_group"] is None)
+            indirect_count = len(controls) - direct_count
+            body_parts.append(
+                f'<details class="more-section" open>'
+                f'<summary>Outbound Object Control ({direct_count} direct · {indirect_count} via group)'
+                f' — objects this owned principal has privileges over</summary>'
+                f'{_object_control_out_html(G, controls)}</details>'
+            )
         body_parts.append('</div>')
 
     # Global sections (pivots / quickwins) — open; stats — collapsed
@@ -1139,6 +1168,7 @@ def render_html_combined(
     node_data: dict,
     stats: dict | None = None,
     intermediates: dict | None = None,
+    outbound_controls: dict | None = None,
     quickwins=None,
     pivots: list[dict] | None = None,
     findings: list["Finding"] | None = None,
@@ -1154,7 +1184,8 @@ def render_html_combined(
     node_overlaps_u = any(source == node_id for source, _ in results)
 
     attack_html = render_html_multi(
-        results, G, target, stats, intermediates, quickwins, pivots, findings,
+        results, G, target, stats, intermediates, outbound_controls,
+        quickwins, pivots, findings,
     )
     attack_body = _html_body_only(attack_html)
 

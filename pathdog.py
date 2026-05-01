@@ -19,7 +19,7 @@ from pathdog.triage import collect_findings
 from pathdog.report import (
     render_markdown_multi, render_html_multi, print_paths_console,
     print_intermediate_targets, print_quickwins, print_findings_console,
-    print_pivot_candidates,
+    print_owned_object_control, print_pivot_candidates,
     print_node_visibility_console,
     render_html_node_visibility, render_markdown_node_visibility,
     render_html_combined,
@@ -533,9 +533,11 @@ def main() -> int:
     # ── Find paths ────────────────────────────────────────────────────────────
     all_results: list[tuple[str, list]] = []
     intermediates: dict[str, list[dict]] = {}
+    outbound_controls: dict[str, list[dict]] = {}
     any_path_found = False
 
     for source in sources:
+        outbound_controls[source] = find_outbound_object_control(G, source)
         if source not in pruned:
             src_display = G.nodes[source].get("name", source)
             print(f"\n[!] No path from '{src_display}' — not connected to DA subgraph.")
@@ -586,6 +588,7 @@ def main() -> int:
             print(f"  Owned user: {src_label}")
             print(f"{'═' * 60}")
         print_paths_console(paths, G, source, target)
+        print_owned_object_control(G, outbound_controls.get(source, []))
         if source in intermediates:
             print_intermediate_targets(G, source, intermediates[source])
 
@@ -613,6 +616,7 @@ def main() -> int:
             fh.write(render_markdown_multi(
                 all_results, G, target, report_stats,
                 intermediates=intermediates, quickwins=quickwins if triage_data else None,
+                outbound_controls=outbound_controls,
                 pivots=pivots, findings=findings if triage_data else None,
             ))
         written.append(md_path)
@@ -624,6 +628,7 @@ def main() -> int:
                 fh.write(render_html_combined(
                     all_results, G, target, node_data, report_stats,
                     intermediates=intermediates,
+                    outbound_controls=outbound_controls,
                     quickwins=quickwins if triage_data else None,
                     pivots=pivots,
                     findings=findings if triage_data else None,
@@ -632,6 +637,7 @@ def main() -> int:
                 fh.write(render_html_multi(
                     all_results, G, target, report_stats,
                     intermediates=intermediates,
+                    outbound_controls=outbound_controls,
                     quickwins=quickwins if triage_data else None,
                     pivots=pivots,
                     findings=findings if triage_data else None,
@@ -643,6 +649,7 @@ def main() -> int:
         write_json_report(json_path, build_json_report(
             G=G, target=target, results=all_results, stats=stats,
             intermediates=intermediates,
+            outbound_controls=outbound_controls,
             quickwins=quickwins if triage_data else None,
             pivots=pivots,
             findings=findings if triage_data else None,

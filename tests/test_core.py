@@ -225,6 +225,45 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(data["findings"], [])
             self.assertEqual(data["quickwins"], {})
 
+    def test_cli_owned_user_reports_outbound_object_control(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            zpath = write_bh_zip(
+                tmp_path / "owned_control.zip",
+                base_files(extra_rels=[
+                    {"StartNode": "U1", "EndNode": "U2", "RelationshipType": "GenericAll"},
+                    {"StartNode": "U1", "EndNode": "DA", "RelationshipType": "CanPSRemote"},
+                ]),
+            )
+            json_path = tmp_path / "owned_control.json"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "pathdog.py",
+                    "-z",
+                    str(zpath),
+                    "-u",
+                    "alice@corp.local",
+                    "--export-json",
+                    str(json_path),
+                    "-f",
+                    "md",
+                    "-o",
+                    str(tmp_path / "owned_control"),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+            self.assertIn("Object control", proc.stdout)
+            self.assertIn("GenericAll on svc_sql@corp.local", proc.stdout)
+            data = json.loads(json_path.read_text())
+            controls = data["owned_results"][0]["outbound_control"]
+            self.assertEqual(controls[0]["relation"], "GenericAll")
+            self.assertEqual(controls[0]["dst"]["name"], "svc_sql@corp.local")
+
     def test_cli_owned_user_with_triage_includes_findings(self):
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
