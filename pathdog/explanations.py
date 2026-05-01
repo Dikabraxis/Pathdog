@@ -370,16 +370,18 @@ QUICKWIN_EXPLANATIONS: dict[str, str] = {
         "LAPS-managed hosts. If you control a reader, the local admin "
         "password is yours."
     ),
-    "ADCS ESC1": "Vulnerable template lets enrollee supply SAN.",
-    "ADCS ESC3": "Enrollment Agent template — request on behalf of others.",
-    "ADCS ESC4": "Write rights on template — pivot it into ESC1.",
-    "ADCS ESC6a": "CA flag enables SAN supply for any client-auth template.",
-    "ADCS ESC6b": "CA strong-mapping bypass.",
-    "ADCS ESC9a": "Template lacks security extension — UPN swap.",
-    "ADCS ESC9b": "Same but for dnsHostName.",
-    "ADCS ESC10a": "Weak DC certificate mapping.",
-    "ADCS ESC10b": "Weak DNS-based DC mapping.",
-    "ADCS ESC13": "Issuance policy linked to a privileged group.",
+    # Keys must match the category strings emitted by quickwins.find_adcs_vulnerable
+    # (`f"ADCS {rel}"`), so the rel name is repeated verbatim.
+    "ADCS ADCSESC1": "Vulnerable template lets enrollee supply SAN.",
+    "ADCS ADCSESC3": "Enrollment Agent template — request on behalf of others.",
+    "ADCS ADCSESC4": "Write rights on template — pivot it into ESC1.",
+    "ADCS ADCSESC6a": "CA flag enables SAN supply for any client-auth template.",
+    "ADCS ADCSESC6b": "CA strong-mapping bypass.",
+    "ADCS ADCSESC9a": "Template lacks security extension — UPN swap.",
+    "ADCS ADCSESC9b": "Same but for dnsHostName.",
+    "ADCS ADCSESC10a": "Weak DC certificate mapping.",
+    "ADCS ADCSESC10b": "Weak DNS-based DC mapping.",
+    "ADCS ADCSESC13": "Issuance policy linked to a privileged group.",
     "ADCS GoldenCert": "CA private key compromised — forge anything.",
     "Domain Controller": (
         "DCs are coercion targets (PetitPotam / PrinterBug / DFSCoerce). "

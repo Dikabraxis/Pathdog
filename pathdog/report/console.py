@@ -173,7 +173,6 @@ def print_owned_object_control(
 def print_pivot_candidates(
     G: "nx.DiGraph",
     pivots: list[dict],
-    limit: int = 10,
 ) -> None:
     """Compact summary: top pivot + count; details in the HTML report."""
     if not pivots:
@@ -193,7 +192,6 @@ def print_pivot_candidates(
 def print_quickwins(
     G: "nx.DiGraph",
     quickwins: dict[str, list["QuickWin"]],
-    limit_per_cat: int = 5,
 ) -> None:
     """One-line summary per category."""
     if not quickwins:

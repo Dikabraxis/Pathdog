@@ -250,41 +250,26 @@ def _do_node_visibility(G, args) -> int:
         data["inbound_sources"], data["outbound_control"], data["inbound_control"],
     )
 
-    written: list[str] = []
-    base = args.output
-    extensions = [e for e in (".md", ".html") if args.fmt in (e[1:], "both")]
-    if any(os.path.exists(f"{base}{ext}") for ext in extensions):
-        base = f"{base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-    if args.fmt in ("md", "both"):
-        md_path = f"{base}.md"
-        with open(md_path, "w", encoding="utf-8") as fh:
-            fh.write(render_markdown_node_visibility(
-                G, data["node_id"], data["target"],
-                data["outbound_paths"], data["outbound_intermediate"],
-                data["inbound_sources"], data["stats"],
-                data["outbound_control"], data["inbound_control"],
-            ))
-        written.append(md_path)
-
-    if args.fmt in ("html", "both"):
-        html_path = f"{base}.html"
-        with open(html_path, "w", encoding="utf-8") as fh:
-            fh.write(render_html_node_visibility(
-                G, data["node_id"], data["target"],
-                data["outbound_paths"], data["outbound_intermediate"],
-                data["inbound_sources"], data["stats"],
-                data["outbound_control"], data["inbound_control"],
-            ))
-        written.append(html_path)
-
-    json_path = _json_path(args, base)
-    if json_path:
-        write_json_report(json_path, build_json_report(
+    base = _resolve_output_base(args)
+    written = _write_reports(
+        args, base,
+        render_md=lambda: render_markdown_node_visibility(
+            G, data["node_id"], data["target"],
+            data["outbound_paths"], data["outbound_intermediate"],
+            data["inbound_sources"], data["stats"],
+            data["outbound_control"], data["inbound_control"],
+        ),
+        render_html=lambda: render_html_node_visibility(
+            G, data["node_id"], data["target"],
+            data["outbound_paths"], data["outbound_intermediate"],
+            data["inbound_sources"], data["stats"],
+            data["outbound_control"], data["inbound_control"],
+        ),
+        build_json=lambda: build_json_report(
             G=G, target=data["target"], results=[], stats=data["stats"],
             node_data=data,
-        ))
-        written.append(json_path)
+        ),
+    )
 
     if written:
         print(f"\n[+] Report(s) written: {', '.join(written)}")
@@ -334,44 +319,64 @@ def _collect_triage_data(G, args) -> dict:
 
 def _write_standalone_triage_report(G, args, triage_data: dict) -> tuple[list[str], str]:
     """Write a triage-only report and return (written_paths, base)."""
-    written: list[str] = []
-    base = args.output
-    extensions = [e for e in (".md", ".html") if args.fmt in (e[1:], "both")]
-    if any(os.path.exists(f"{base}{ext}") for ext in extensions):
-        base = f"{base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
+    base = _resolve_output_base(args)
     report_stats = triage_data["stats"] if args.verbose else None
     target = triage_data["target"]
     quickwins = triage_data["quickwins"]
     findings = triage_data["findings"]
 
-    if args.fmt in ("md", "both"):
-        md_path = f"{base}.md"
-        with open(md_path, "w", encoding="utf-8") as fh:
-            fh.write(render_markdown_multi(
-                [], G, target, report_stats,
-                quickwins=quickwins, findings=findings,
-            ))
-        written.append(md_path)
-
-    if args.fmt in ("html", "both"):
-        html_path = f"{base}.html"
-        with open(html_path, "w", encoding="utf-8") as fh:
-            fh.write(render_html_multi(
-                [], G, target, report_stats,
-                quickwins=quickwins, findings=findings,
-            ))
-        written.append(html_path)
-
-    json_path = _json_path(args, base)
-    if json_path:
-        write_json_report(json_path, build_json_report(
+    written = _write_reports(
+        args, base,
+        render_md=lambda: render_markdown_multi(
+            [], G, target, report_stats,
+            quickwins=quickwins, findings=findings,
+        ),
+        render_html=lambda: render_html_multi(
+            [], G, target, report_stats,
+            quickwins=quickwins, findings=findings,
+        ),
+        build_json=lambda: build_json_report(
             G=G, target=target, results=[], stats=triage_data["stats"],
             quickwins=quickwins, findings=findings,
-        ))
-        written.append(json_path)
+        ),
+    )
 
     return written, base
+
+
+def _write_triage_node_combined(G, args, triage_data: dict, node_data: dict) -> list[str]:
+    """Write a triage + node-visibility combined report (no -u case)."""
+    base = _resolve_output_base(args)
+    report_stats = triage_data["stats"] if args.verbose else None
+    target = triage_data["target"]
+    quickwins = triage_data["quickwins"]
+    findings = triage_data["findings"]
+
+    def _md() -> str:
+        triage_md = render_markdown_multi(
+            [], G, target, report_stats,
+            quickwins=quickwins, findings=findings,
+        )
+        node_md = render_markdown_node_visibility(
+            G, node_data["node_id"], node_data["target"],
+            node_data["outbound_paths"], node_data["outbound_intermediate"],
+            node_data["inbound_sources"], node_data["stats"],
+            node_data["outbound_control"], node_data["inbound_control"],
+        )
+        return f"{triage_md}\n\n---\n\n{node_md}"
+
+    return _write_reports(
+        args, base,
+        render_md=_md,
+        render_html=lambda: render_html_combined(
+            [], G, target, node_data, report_stats,
+            quickwins=quickwins, findings=findings,
+        ),
+        build_json=lambda: build_json_report(
+            G=G, target=target, results=[], stats=triage_data["stats"],
+            quickwins=quickwins, findings=findings, node_data=node_data,
+        ),
+    )
 
 
 def _json_path(args, base: str) -> str | None:
@@ -379,6 +384,43 @@ def _json_path(args, base: str) -> str | None:
     if args.export_json is None:
         return None
     return args.export_json or f"{base}.json"
+
+
+def _resolve_output_base(args) -> str:
+    """Pick output basename, suffixing with a timestamp if a target file exists."""
+    base = args.output
+    extensions = [e for e in (".md", ".html") if args.fmt in (e[1:], "both")]
+    if any(os.path.exists(f"{base}{ext}") for ext in extensions):
+        base = f"{base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    return base
+
+
+def _write_reports(
+    args,
+    base: str,
+    *,
+    render_md=None,
+    render_html=None,
+    build_json=None,
+) -> list[str]:
+    """Write the requested formats. Renderers are callables so unused formats
+    don't pay the rendering cost."""
+    written: list[str] = []
+    if args.fmt in ("md", "both") and render_md is not None:
+        path = f"{base}.md"
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(render_md())
+        written.append(path)
+    if args.fmt in ("html", "both") and render_html is not None:
+        path = f"{base}.html"
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(render_html())
+        written.append(path)
+    json_path = _json_path(args, base)
+    if json_path and build_json is not None:
+        write_json_report(json_path, build_json())
+        written.append(json_path)
+    return written
 
 
 def main() -> int:
@@ -426,53 +468,12 @@ def main() -> int:
     # ── Validate -u is provided for path-finding ──────────────────────────────
     if not args.users:
         if args.triage and node_data:
-            written: list[str] = []
-            base = args.output
-            extensions = [e for e in (".md", ".html") if args.fmt in (e[1:], "both")]
-            if any(os.path.exists(f"{base}{ext}") for ext in extensions):
-                base = f"{base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-            report_stats = triage_data["stats"] if args.verbose else None
-            target = triage_data["target"]
-            quickwins = triage_data["quickwins"]
-            findings = triage_data["findings"]
-
-            if args.fmt in ("md", "both"):
-                md_path = f"{base}.md"
-                with open(md_path, "w", encoding="utf-8") as fh:
-                    fh.write(render_markdown_multi(
-                        [], G, target, report_stats,
-                        quickwins=quickwins, findings=findings,
-                    ))
-                    fh.write("\n\n---\n\n")
-                    fh.write(render_markdown_node_visibility(
-                        G, node_data["node_id"], node_data["target"],
-                        node_data["outbound_paths"], node_data["outbound_intermediate"],
-                        node_data["inbound_sources"], node_data["stats"],
-                        node_data["outbound_control"], node_data["inbound_control"],
-                    ))
-                written.append(md_path)
-
-            if args.fmt in ("html", "both"):
-                html_path = f"{base}.html"
-                with open(html_path, "w", encoding="utf-8") as fh:
-                    fh.write(render_html_combined(
-                        [], G, target, node_data, report_stats,
-                        quickwins=quickwins, findings=findings,
-                    ))
-                written.append(html_path)
-
-            json_path = _json_path(args, base)
-            if json_path:
-                write_json_report(json_path, build_json_report(
-                    G=G, target=target, results=[], stats=triage_data["stats"],
-                    quickwins=quickwins, findings=findings, node_data=node_data,
-                ))
-                written.append(json_path)
-
+            written = _write_triage_node_combined(G, args, triage_data, node_data)
             if written:
                 print(f"\n[+] Report(s) written: {', '.join(written)}")
-            return 0 if findings or quickwins or node_data else 2
+            return 0 if (
+                triage_data["findings"] or triage_data["quickwins"] or node_data
+            ) else 2
         parser.error("argument -u/--user is required unless --list, --triage, or --node is used")
 
     # ── Expand user list ──────────────────────────────────────────────────────
@@ -602,60 +603,49 @@ def main() -> int:
         print_quickwins(G, quickwins)
 
     # ── Write reports ─────────────────────────────────────────────────────────
-    written: list[str] = []
     report_stats = stats if args.verbose else None
+    qw_for_report = quickwins if triage_data else None
+    fd_for_report = findings if triage_data else None
 
-    base = args.output
-    extensions = [e for e in (".md", ".html") if args.fmt in (e[1:], "both")]
-    if any(os.path.exists(f"{base}{ext}") for ext in extensions):
-        base = f"{base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-    if args.fmt in ("md", "both"):
-        md_path = f"{base}.md"
-        with open(md_path, "w", encoding="utf-8") as fh:
-            fh.write(render_markdown_multi(
-                all_results, G, target, report_stats,
-                intermediates=intermediates, quickwins=quickwins if triage_data else None,
+    def _render_html() -> str:
+        if node_data:
+            return render_html_combined(
+                all_results, G, target, node_data, report_stats,
+                intermediates=intermediates,
                 outbound_controls=outbound_controls,
-                pivots=pivots, findings=findings if triage_data else None,
-            ))
-        written.append(md_path)
+                quickwins=qw_for_report,
+                pivots=pivots,
+                findings=fd_for_report,
+            )
+        return render_html_multi(
+            all_results, G, target, report_stats,
+            intermediates=intermediates,
+            outbound_controls=outbound_controls,
+            quickwins=qw_for_report,
+            pivots=pivots,
+            findings=fd_for_report,
+        )
 
-    if args.fmt in ("html", "both"):
-        html_path = f"{base}.html"
-        with open(html_path, "w", encoding="utf-8") as fh:
-            if node_data:
-                fh.write(render_html_combined(
-                    all_results, G, target, node_data, report_stats,
-                    intermediates=intermediates,
-                    outbound_controls=outbound_controls,
-                    quickwins=quickwins if triage_data else None,
-                    pivots=pivots,
-                    findings=findings if triage_data else None,
-                ))
-            else:
-                fh.write(render_html_multi(
-                    all_results, G, target, report_stats,
-                    intermediates=intermediates,
-                    outbound_controls=outbound_controls,
-                    quickwins=quickwins if triage_data else None,
-                    pivots=pivots,
-                    findings=findings if triage_data else None,
-                ))
-        written.append(html_path)
-
-    json_path = _json_path(args, base)
-    if json_path:
-        write_json_report(json_path, build_json_report(
+    base = _resolve_output_base(args)
+    written = _write_reports(
+        args, base,
+        render_md=lambda: render_markdown_multi(
+            all_results, G, target, report_stats,
+            intermediates=intermediates, quickwins=qw_for_report,
+            outbound_controls=outbound_controls,
+            pivots=pivots, findings=fd_for_report,
+        ),
+        render_html=_render_html,
+        build_json=lambda: build_json_report(
             G=G, target=target, results=all_results, stats=stats,
             intermediates=intermediates,
             outbound_controls=outbound_controls,
-            quickwins=quickwins if triage_data else None,
+            quickwins=qw_for_report,
             pivots=pivots,
-            findings=findings if triage_data else None,
+            findings=fd_for_report,
             node_data=node_data,
-        ))
-        written.append(json_path)
+        ),
+    )
 
     if written:
         print(f"\n[+] Report(s) written: {', '.join(written)}")

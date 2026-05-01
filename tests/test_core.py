@@ -6,6 +6,7 @@ import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from pathdog.explanations import for_quickwin
 from pathdog.graph import build_graph
 from pathdog.loader import load_zip
 from pathdog.commands import get_commands
@@ -123,6 +124,22 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(
                 sum(1 for f in findings if f.category == "ADCS ADCSESC1"),
                 1,
+            )
+
+    def test_quickwin_explanations_cover_emitted_adcs_categories(self):
+        # Quickwins emit categories like "ADCS ADCSESC1"; the explanation
+        # lookup must use the same key so HTML reports never render an empty
+        # explanation block.
+        for rel in (
+            "ADCSESC1", "ADCSESC3", "ADCSESC4",
+            "ADCSESC6a", "ADCSESC6b",
+            "ADCSESC9a", "ADCSESC9b",
+            "ADCSESC10a", "ADCSESC10b",
+            "ADCSESC13", "GoldenCert",
+        ):
+            self.assertTrue(
+                for_quickwin(f"ADCS {rel}"),
+                msg=f"missing explanation for category 'ADCS {rel}'",
             )
 
     def test_cli_triage_runs_without_owned_user_and_exports_json(self):

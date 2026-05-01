@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 from ._helpers import (
     _display_name, _edge_commands, _node_flags, _path_yields_dcsync,
 )
-from ._helpers import _DCSYNC_GRANTING_EDGES  # noqa: F401  (re-exported for callers)
 from .assets import _HTML_HEAD
 from ..explanations import for_edge as _explain_edge
 from ..explanations import for_quickwin as _explain_quickwin
@@ -1176,8 +1175,9 @@ def render_html_combined(
     """Single HTML combining -u (attack paths) and --node (visibility) sections.
 
     When the --node target is also one of the -u sources, the --node section
-    drops the duplicate Attack Paths / HVTs blocks and only keeps the unique
-    parts: inbound attackers and inbound/outbound object control.
+    drops blocks already rendered in the -u part (attack paths, HVTs, outbound
+    object control) and keeps only what's unique: inbound attackers and
+    inbound object control.
     """
     node_id = node_data["node_id"]
     node_name = _escape(_display_name(G, node_id))
@@ -1190,25 +1190,17 @@ def render_html_combined(
     attack_body = _html_body_only(attack_html)
 
     if node_overlaps_u:
-        outbound_control = node_data["outbound_control"] or []
         inbound_control = node_data["inbound_control"] or []
         inbound_sources = node_data["inbound_sources"]
-        direct = sum(1 for e in outbound_control if e["via_group"] is None)
-        indirect = len(outbound_control) - direct
         node_body = (
             f'<div class="report-section">'
-            f'<p class="section-lead">Outbound paths and reachable HVTs are already '
-            f'covered in the Attack Paths section above. Below are the inbound '
-            f'attackers and the object-control surface of <code>{node_name}</code>.</p>'
+            f'<p class="section-lead">Outbound paths, reachable HVTs and outbound '
+            f'object control for <code>{node_name}</code> are already covered in '
+            f'the Attack Paths section above. Below are the inbound-only views.</p>'
             f'<details class="more-section" open>'
             f'<summary>← Inbound Attackers ({len(inbound_sources)} principal(s))'
             f' — who has an attack path leading TO this node</summary>'
             f'{_inbound_sources_html(G, inbound_sources)}'
-            f'</details>'
-            f'<details class="more-section">'
-            f'<summary>→ Outbound Object Control ({direct} direct · {indirect} via group)'
-            f' — objects this node has privileges over</summary>'
-            f'{_object_control_out_html(G, outbound_control)}'
             f'</details>'
             f'<details class="more-section">'
             f'<summary>← Inbound Object Control ({len(inbound_control)} principal(s))'
