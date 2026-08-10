@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ._helpers import (
-    _display_name, _edge_commands, _node_flags, _path_yields_dcsync,
-)
-from .assets import _HTML_HEAD
 from ..explanations import for_edge as _explain_edge
 from ..explanations import for_quickwin as _explain_quickwin
 from ..explanations import for_vector as _explain_vector
+from ._helpers import (
+    _display_name,
+    _edge_commands,
+    _node_flags,
+    _path_yields_dcsync,
+)
+from .assets import _HTML_HEAD
 
 if TYPE_CHECKING:
     import networkx as nx
@@ -267,6 +270,17 @@ def _step_html(
             f'</details>'
         )
 
+    preconditions_html = ""
+    if cmd.preconditions:
+        items = "".join(
+            f"<li>{_escape(item)}</li>" for item in cmd.preconditions
+        )
+        preconditions_html = (
+            f'<div class="step-impact"><b>Confidence:</b> '
+            f'{_escape(cmd.confidence.upper())}<br>'
+            f'<b>Prerequisites:</b><ul>{items}</ul></div>'
+        )
+
     alt_html = ""
     alt_rels = [
         r for r in (edge.get("relations") or {})
@@ -293,6 +307,7 @@ def _step_html(
         f'<div class="step-explain">{_escape(explain["plain"])}</div>'
         f'<div class="step-impact"><b>After this:</b> {_escape(explain["impact"])}</div>'
         f'{alt_html}'
+        f'{preconditions_html}'
         f'{cmd_block}'
         f'{ident_change}'
         f'</div></div>'
@@ -405,6 +420,15 @@ def _pivots_html(G: "nx.DiGraph", pivots: list[dict]) -> str:
                 f'</div>'
             )
         vectors_html = "".join(vec_blocks)
+        prerequisites = pv.get("prerequisites", [])
+        prereq_html = ""
+        if prerequisites:
+            items = "".join(f"<li>{_escape(item)}</li>" for item in prerequisites)
+            confidence = _escape(pv.get("confidence", "medium").upper())
+            prereq_html = (
+                f'<div class="vector-explain"><b>Confidence:</b> {confidence}'
+                f'<br><b>Prerequisites:</b><ul>{items}</ul></div>'
+            )
 
         # Commands always visible (the whole point: copy-paste them)
         cmd_block = ""
@@ -450,6 +474,7 @@ def _pivots_html(G: "nx.DiGraph", pivots: list[dict]) -> str:
             f'</div>'
             f'<div class="pivot-body">'
             f'{vectors_html}'
+            f'{prereq_html}'
             f'{cmd_block}'
             f'{chain}'
             f'</div>'

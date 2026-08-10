@@ -36,6 +36,7 @@ TRAVERSABLE_EDGES = frozenset({
     "AllowedToDelegate",
     "CanPSRemote",
     "CanRDP",
+    "CanApplyGPO",
     "ClaimSpecialIdentity",
     "CoerceAndRelayNTLMToADCS",
     "CoerceAndRelayNTLMToLDAP",
@@ -43,7 +44,7 @@ TRAVERSABLE_EDGES = frozenset({
     "CoerceAndRelayNTLMToSMB",
     "CoerceToTGT",
     "Contains",
-    "CrossForestTrust",
+    "ContainsIdentity",
     "DCFor",
     "DCSync",
     "DumpSMSAPassword",
@@ -53,6 +54,7 @@ TRAVERSABLE_EDGES = frozenset({
     "GenericWrite",
     "GoldenCert",
     "GPLink",
+    "GPOAppliesTo",
     "HasSIDHistory",
     "HasSession",
     "HasTrustKeys",
@@ -61,6 +63,7 @@ TRAVERSABLE_EDGES = frozenset({
     "MemberOf",
     "Owns",
     "OwnsLimitedRights",
+    "PropagatesACEsTo",
     "ReadGMSAPassword",
     "ReadLAPSPassword",
     "SameForestTrust",
@@ -81,6 +84,7 @@ TRAVERSABLE_EDGES = frozenset({
 
 
 NON_TRAVERSABLE_EDGES = frozenset({
+    "CrossForestTrust",
     "DelegatedEnrollmentAgent",
     "Enroll",
     "EnrollOnBehalfOf",

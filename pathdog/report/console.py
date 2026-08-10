@@ -122,6 +122,8 @@ def print_paths_console(
         dst = _display_name(G, edge["dst"])
         print(f"    {_bold(_blue(f'# Step {step}:'))} {_relation(rel)} on {_magenta(dst)}  "
               f"{_dim(f'(as {actor})')}")
+        for prerequisite in cmd.preconditions:
+            print(f"      {_yellow('?')} {_dim(prerequisite)}")
         for c in cmd.commands or []:
             if c.startswith("#"):
                 print(f"      {_dim(c)}")

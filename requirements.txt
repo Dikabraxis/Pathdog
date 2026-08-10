@@ -1,3 +1,2 @@
-networkx>=3.1
-thefuzz>=0.20.0
-python-Levenshtein>=0.21.0
+networkx>=3.6.1,<4
+rapidfuzz>=3.14,<4

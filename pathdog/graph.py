@@ -20,8 +20,21 @@ def build_raw_graph(nodes: list[dict], edges: list[dict]) -> nx.DiGraph:
 
     for node in nodes:
         nid = node["id"]
-        name = node["props"].get("name") or node["props"].get("Name") or nid
-        G.add_node(nid, kind=node["kind"], name=name, props=node["props"])
+        incoming_props = node.get("props", {})
+        if nid in G:
+            existing = G.nodes[nid]
+            merged_props = {**existing.get("props", {}), **incoming_props}
+            incoming_kind = node.get("kind", "unknown")
+            kind = (
+                incoming_kind
+                if incoming_kind != "unknown"
+                else existing.get("kind", "unknown")
+            )
+        else:
+            merged_props = dict(incoming_props)
+            kind = node.get("kind", "unknown")
+        name = merged_props.get("name") or merged_props.get("Name") or nid
+        G.add_node(nid, kind=kind, name=name, props=merged_props)
 
     relationship_types: set[str] = set()
 
@@ -79,26 +92,77 @@ def build_graph(nodes: list[dict], edges: list[dict]) -> nx.DiGraph:
     return postprocess_graph(build_raw_graph(nodes, edges))
 
 
-def resolve_target(G: nx.DiGraph, target_hint: str | None) -> str | None:
-    """Find the Domain Admins node. Accepts explicit SID/name or auto-detects."""
-    if target_hint:
-        if target_hint in G:
-            return target_hint
-        hint_lower = target_hint.lower()
-        for nid in G.nodes:
-            if hint_lower in nid.lower():
-                return nid
-            name = G.nodes[nid].get("name", "")
-            if hint_lower in name.lower():
-                return nid
-        return None
+def _domain_hint(G: nx.DiGraph, node_id: str) -> str:
+    if node_id not in G:
+        return ""
+    props = G.nodes[node_id].get("props", {})
+    lowered = {str(key).lower(): value for key, value in props.items()}
+    for key in ("domain", "domainname", "domainsid"):
+        if lowered.get(key):
+            return str(lowered[key]).strip().lower()
+    name = str(G.nodes[node_id].get("name", ""))
+    if "@" in name:
+        return name.rsplit("@", 1)[1].strip().lower()
+    sid = str(node_id).upper()
+    if sid.startswith("S-1-5-21-") and sid.count("-") >= 7:
+        return sid.rsplit("-", 1)[0].lower()
+    return ""
 
-    for nid in G.nodes:
-        if "domain admins" in nid.lower():
-            return nid
-        name = G.nodes[nid].get("name", "")
-        if "domain admins" in name.lower():
-            return nid
+
+def target_candidates(
+    G: nx.DiGraph,
+    target_hint: str | None,
+) -> list[str]:
+    """Return all matching targets without silently choosing an ambiguity."""
+    if target_hint:
+        hint = target_hint.strip().lower()
+        exact = [
+            node_id
+            for node_id in G.nodes
+            if hint == str(node_id).lower()
+            or hint == str(G.nodes[node_id].get("name", "")).lower()
+        ]
+        if exact:
+            return sorted(set(exact))
+        partial = [
+            node_id
+            for node_id in G.nodes
+            if hint in str(node_id).lower()
+            or hint in str(G.nodes[node_id].get("name", "")).lower()
+        ]
+        return sorted(set(partial))
+
+    candidates = []
+    for node_id, data in G.nodes(data=True):
+        if data.get("kind") != "groups":
+            continue
+        name = str(data.get("name", node_id)).lower()
+        base_name = name.split("@", 1)[0].strip()
+        sid = str(node_id).upper()
+        if base_name == "domain admins" or sid.endswith("-512"):
+            candidates.append(node_id)
+    return sorted(set(candidates))
+
+
+def resolve_target(
+    G: nx.DiGraph,
+    target_hint: str | None,
+    *,
+    source: str | None = None,
+) -> str | None:
+    """Resolve a unique target, optionally constrained to the source domain."""
+    candidates = target_candidates(G, target_hint)
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1 and source:
+        source_domain = _domain_hint(G, source)
+        same_domain = [
+            candidate
+            for candidate in candidates
+            if _domain_hint(G, candidate) == source_domain
+        ]
+        if len(same_domain) == 1:
+            return same_domain[0]
     return None
 
 

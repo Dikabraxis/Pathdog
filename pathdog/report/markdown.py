@@ -5,7 +5,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ._helpers import (
-    _display_name, _edge_commands, _node_flags, _path_yields_dcsync,
+    _display_name,
+    _edge_commands,
+    _node_flags,
+    _path_yields_dcsync,
 )
 
 if TYPE_CHECKING:
@@ -123,6 +126,11 @@ def render_markdown(
             lines.append(f"**Hop {j} — [{edge['relation']}]** `{src_label}` → `{dst_label}`\n")
             lines.append(f"> *Operating as: `{actor}`*  ")
             lines.append(f"> {cmd.description}\n")
+            if cmd.preconditions:
+                lines.append(f"> **Confidence:** {cmd.confidence.upper()}  ")
+                for prerequisite in cmd.preconditions:
+                    lines.append(f"> - {prerequisite}")
+                lines.append("")
             if cmd.has_commands:
                 lines.append("```bash")
                 lines.extend(cmd.commands)
@@ -249,6 +257,12 @@ def _pivots_md(G: "nx.DiGraph", pivots: list[dict]) -> list[str]:
         nid = pv["node"]
         ptd = pv["path_to_da"]
         lines.append(f"### {i}. `{_display_name(G, nid)}`\n")
+        prerequisites = pv.get("prerequisites", [])
+        if prerequisites:
+            lines.append(f"**Confidence:** {pv.get('confidence', 'medium').upper()}\n")
+            lines.append("**Prerequisites:**")
+            lines.extend(f"- {item}" for item in prerequisites)
+            lines.append("")
         if pv["vector_commands"]:
             lines.append("```bash")
             lines.extend(pv["vector_commands"])
@@ -411,6 +425,11 @@ def render_markdown_node_visibility(
                 lines.append(f"**Hop {j} — [{edge['relation']}]** `{src_l}` → `{dst_l}`\n")
                 lines.append(f"> *Operating as: `{actor}`*  ")
                 lines.append(f"> {cmd.description}\n")
+                if cmd.preconditions:
+                    lines.append(f"> **Confidence:** {cmd.confidence.upper()}  ")
+                    for prerequisite in cmd.preconditions:
+                        lines.append(f"> - {prerequisite}")
+                    lines.append("")
                 if cmd.has_commands:
                     lines.append("```bash")
                     lines.extend(cmd.commands)

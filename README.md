@@ -9,15 +9,16 @@ hops. No Neo4j, no GUI, no depth limit.
 ```bash
 git clone https://github.com/Dikabraxis/Pathdog.git
 cd Pathdog
-pip install -r requirements.txt
+pipx install .
 ```
 
-Python 3.10+.
+Alternatively, install in a virtual environment with `python -m pip install .`.
+Pathdog requires Python 3.11 or newer.
 
 ## Usage
 
 ```
-python3 pathdog.py -z <dump.zip> -u <user> [options]
+pathdog -z <dump.zip> -u <user> [options]
 ```
 
 `-u` is required for attack-path mode. It is not required when using
@@ -31,7 +32,7 @@ python3 pathdog.py -z <dump.zip> -u <user> [options]
 | `-k N` | Number of paths per user (default `3`). |
 | `-o BASENAME` | Output base name (default `pathdog_report`). |
 | `-f md \| html \| both` | Report format (default `html`). Pass `md` or `both` to also produce a Markdown report. |
-| `-l KIND` | List nodes and exit. Omit `KIND` to list all nodes. `KIND` = `users`, `computers`, `groups`, `domains`, `gpos`, `ous`, `containers`, `certtemplates`, `enterprisecas`, `rootcas`, `aiacas`, `ntauthstores`, `all`. |
+| `-l KIND` | List nodes and exit. Omit `KIND` to list all nodes. Includes AD, GPO, container and PKI object kinds. |
 | `-v` | Show graph statistics. |
 | `--triage` | Add global prioritized triage. Can run alone or combine with `-u` / `--node`. |
 | `--export-json [FILE]` | Write a structured JSON report. Defaults to `<output>.json`. |
@@ -41,38 +42,43 @@ python3 pathdog.py -z <dump.zip> -u <user> [options]
 | `--no-pivots` | Disable pivot-candidate scan. |
 | `--fallback-top N` | Cap intermediate targets per user (default `10`). |
 | `--pivots-top N` | Cap pivot candidates (default `15`). |
+| `--compat` | Validate relationship types and source/target pairs against the vendored BloodHound schema, then exit. |
+| `--version` | Print the installed Pathdog version. |
 
 ## Examples
 
 ```bash
 # Basic, find paths from a single owned user
-python3 pathdog.py -z corp.zip -u john.doe@corp.local
+pathdog -z corp.zip -u john.doe@corp.local
 
 # Multiple ZIPs, multiple users (paths can cross-chain between them)
-python3 pathdog.py -z dump1.zip dump2.zip -u alice@corp.local bob@corp.local
+pathdog -z dump1.zip dump2.zip -u alice@corp.local bob@corp.local
 
 # Owned users from a text file (lines starting with # are ignored)
-python3 pathdog.py -z corp.zip -u owned.txt -k 5 -f html -v
+pathdog -z corp.zip -u owned.txt -k 5 -f html -v
 
 # Target a computer instead of DA
-python3 pathdog.py -z corp.zip -u alice@corp.local -t DC01.corp.local
+pathdog -z corp.zip -u alice@corp.local -t DC01.corp.local
 
 # Just inspect the dump without running pathfinding
-python3 pathdog.py -z corp.zip --list users
-python3 pathdog.py -z corp.zip --list all
+pathdog -z corp.zip --list users
+pathdog -z corp.zip --list all
+
+# Check a collection before analysis; exit 3 means manual review is required
+pathdog -z corp.zip --compat --export-json compat.json
 
 # Global triage without an owned user
-python3 pathdog.py -z corp.zip --triage --export-json
+pathdog -z corp.zip --triage --export-json
 
 # 360° visibility on a node, what it can reach and who can reach it
-python3 pathdog.py -z corp.zip --node svc_backup@corp.local
+pathdog -z corp.zip --node svc_backup@corp.local
 
 # Combine -u and --node, single HTML with both sections
-python3 pathdog.py -z corp.zip -u john.doe@corp.local --node svc_backup@corp.local -f html
+pathdog -z corp.zip -u john.doe@corp.local --node svc_backup@corp.local -f html
 
 # Add triage only when you want dump-wide findings in the same report
-python3 pathdog.py -z corp.zip -u john.doe@corp.local --triage -f html
-python3 pathdog.py -z corp.zip --node svc_backup@corp.local --triage -f html
+pathdog -z corp.zip -u john.doe@corp.local --triage -f html
+pathdog -z corp.zip --node svc_backup@corp.local --triage -f html
 ```
 
 ## What you get
@@ -85,8 +91,8 @@ The HTML report shows:
 - **One-line verdict** at the top, path found, no path but pivot available,
   or nothing actionable.
 - **Best path** with an ASCII chain overview, then each hop as a card with
-  a plain-English title, what it means, the impact, and the exact commands
-  to run as the current identity.
+  a plain-English title, what it means, the impact, prerequisites, confidence,
+  and version-targeted command guidance for the current identity.
 - **Pivot candidates** when no direct path exists, principals that already
   have a path to the target and can be compromised out-of-band (Kerberoast,
   AS-REP roast, weak password, LAPS, unconstrained delegation).
@@ -108,7 +114,7 @@ then ranks them by severity. This is useful for first-pass review, report
 generation, or deciding which owned user to test next.
 
 ```bash
-python3 pathdog.py -z corp.zip --triage -f both --export-json
+pathdog -z corp.zip --triage -f both --export-json
 ```
 
 Example console output:
@@ -269,16 +275,24 @@ and can be forced in captured output with `FORCE_COLOR=1`.
 - Multiple ZIPs are merged into a single graph before pathfinding,
   duplicate nodes and edges are deduplicated automatically.
 - Pathfinding is fail-closed and uses only BloodHound-traversable edge types
-  that Pathdog explicitly supports. Unknown, legacy, non-traversable, and
-  not-yet-supported relations remain available as context but cannot create
-  attack paths.
+  that Pathdog explicitly models. Unknown, legacy and non-traversable
+  relations remain available as context but cannot create attack paths.
 - Pathdog synthesizes `DCSync` from effective `GetChanges` + `GetChangesAll`
   rights, including rights inherited through nested groups.
 - Pathdog synthesizes `SyncLAPSPassword` from effective `GetChanges` +
   `GetChangesInFilteredSet` rights to LAPS-enabled computers in the
   corresponding domain.
-- Relationship classification is reviewed against BloodHound 9.5.1 and
-  SharpHound 2.14.0. Modern traversable edges without an implemented Pathdog
-  abuse model are reported and blocked rather than silently accepted.
+- Relationship classification covers all 64 traversable AD edge names in
+  BloodHound 9.5.1 and targets SharpHound 2.14.0.
+- `pathdog --compat` uses a vendored upstream `valid_edges.json` snapshot for
+  advisory source/target validation. Traversability remains a separate,
+  explicit allowlist because `valid_edges.json` does not encode it.
+- Generated templates target Impacket 0.13.x, Certipy 5.x, BloodyAD and
+  NetExec-style CLIs. Preconditions remain part of the output; guidance is
+  not a guarantee that an abuse will succeed in a specific environment.
 - Tests use small synthetic BloodHound ZIPs and run with the Python standard
   library test runner: `python3 -m unittest discover -s tests`.
+
+## License
+
+Pathdog is available under the [MIT License](LICENSE).

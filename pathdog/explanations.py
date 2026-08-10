@@ -8,7 +8,6 @@ Each entry has:
 
 from __future__ import annotations
 
-
 _DESCRIPTIONS: dict[str, dict[str, str]] = {
     "MemberOf": {
         "title": "Group membership",
@@ -172,8 +171,8 @@ _DESCRIPTIONS: dict[str, dict[str, str]] = {
     },
     "CrossForestTrust": {
         "title": "Cross-forest trust",
-        "plain": "Trust spanning forests. With SID filtering off (or via specific bypasses), forge an inter-realm ticket and reach DA in the other forest.",
-        "impact": "DA in the trusted forest (when SID filtering is misconfigured).",
+        "plain": "Context-only trust spanning forests. This relation alone is not an attack step.",
+        "impact": "Look for a derived SpoofSIDHistory, AbuseTGTDelegation or HasTrustKeys edge.",
     },
     "DCFor": {
         "title": "Is a Domain Controller",
@@ -304,6 +303,94 @@ _DESCRIPTIONS: dict[str, dict[str, str]] = {
     },
 }
 
+_DESCRIPTIONS.update({
+    "ReadGMSAPassword": {
+        "title": "Read the gMSA managed password",
+        "plain": "The source can retrieve the target gMSA password and derive its NT hash.",
+        "impact": "Authenticate as the gMSA.",
+    },
+    "DumpSMSAPassword": {
+        "title": "Dump the sMSA password",
+        "plain": "An authorized host can expose the standalone managed service account secret.",
+        "impact": "Authenticate as the sMSA.",
+    },
+    "HasTrustKeys": {
+        "title": "Authenticate with domain trust keys",
+        "plain": "The source domain holds keys for the target trust account.",
+        "impact": "Kerberos network authentication as the trust account.",
+    },
+    "SpoofSIDHistory": {
+        "title": "Spoof SID history across a trust",
+        "plain": "Trust configuration permits a forged or injected SID to survive filtering.",
+        "impact": "Claim the privileges associated with the target SID.",
+    },
+    "AddAllowedToAct": {
+        "title": "Add a principal allowed to act",
+        "plain": "Write an RBCD entry for a controlled SPN-bearing principal.",
+        "impact": "Impersonate a delegable user to services on the target computer.",
+    },
+    "WriteAltSecurityIdentities": {
+        "title": "Write an explicit certificate mapping",
+        "plain": "Map a controlled certificate identity to the target account.",
+        "impact": "Certificate authentication as the target when mapping policy permits it.",
+    },
+    "WritePublicInformation": {
+        "title": "Write public-information attributes",
+        "plain": "The source can modify the target's public-information property set.",
+        "impact": "Depends on the exact writable attribute and current BloodHound primitive.",
+    },
+    "AbuseTGTDelegation": {
+        "title": "Abuse TGT delegation across a trust",
+        "plain": "Trust settings permit a delegated TGT to cross the relationship.",
+        "impact": "Capture or reuse a privileged TGT when all trust prerequisites hold.",
+    },
+    "CoerceToTGT": {
+        "title": "Coerce authentication to capture a TGT",
+        "plain": "A controlled delegation endpoint may receive a reusable TGT after coercion.",
+        "impact": "Operate as the coerced principal.",
+    },
+    "ClaimSpecialIdentity": {
+        "title": "Claim a special identity",
+        "plain": "The principal token automatically satisfies the target special identity.",
+        "impact": "Inherit the special identity's outgoing privileges.",
+    },
+    "ContainsIdentity": {
+        "title": "Container includes an identity",
+        "plain": "BloodHound's calculated identity-containment relationship; no separate action is required.",
+        "impact": "Continue through the contained identity's effective privileges.",
+    },
+    "PropagatesACEsTo": {
+        "title": "Inherited ACE propagation",
+        "plain": "An ACE on the source object propagates to the target object.",
+        "impact": "The effective permission represented by the adjacent path applies to the target.",
+    },
+    "GPOAppliesTo": {
+        "title": "GPO applies to target",
+        "plain": "BloodHound calculated that the GPO is applied to the target after scope and filtering checks.",
+        "impact": "A controlled GPO can affect the target according to its policy settings.",
+    },
+    "CanApplyGPO": {
+        "title": "Can apply a GPO primitive",
+        "plain": "BloodHound calculated a usable GPO-control path for this principal.",
+        "impact": "Potential policy-based code execution on the objects covered by the GPO.",
+    },
+    "HasSIDHistory": {
+        "title": "SID history grants another identity",
+        "plain": "The target SID is present in the source token through SID history.",
+        "impact": "Inherit privileges granted to the historical SID.",
+    },
+    "SyncedToADUser": {
+        "title": "Synchronized to an AD user",
+        "plain": "The cloud identity is linked to the target Active Directory identity.",
+        "impact": "Continue through the synchronized identity relationship.",
+    },
+    "SyncedToEntraUser": {
+        "title": "Synchronized to an Entra user",
+        "plain": "The Active Directory identity is linked to the target cloud identity.",
+        "impact": "Continue through the synchronized identity relationship.",
+    },
+})
+
 
 def for_edge(rel_type: str) -> dict[str, str]:
     """Return {title, plain, impact} for a relation type, or sensible defaults."""
@@ -340,6 +427,14 @@ VECTOR_EXPLANATIONS: dict[str, str] = {
         "If you reach SYSTEM on this host (with unconstrained delegation), any "
         "user that authenticates to it leaves a usable TGT in LSASS. Coerce a "
         "DC, capture its TGT, DCSync."
+    ),
+    "Confirmed LAPS password read from an owned principal": (
+        "An owned principal has a traversable ReadLAPSPassword or "
+        "SyncLAPSPassword relationship to this host."
+    ),
+    "Controlled host with unconstrained delegation": (
+        "An owned principal has a concrete takeover path to this host, and "
+        "the host is configured for unconstrained delegation."
     ),
 }
 
@@ -387,9 +482,11 @@ QUICKWIN_EXPLANATIONS: dict[str, str] = {
         "DCs are coercion targets (PetitPotam / PrinterBug / DFSCoerce). "
         "Authenticated users can trigger NTLM auth from them."
     ),
-    "Privileged user not protected": (
-        "AdminCount=1 but not in 'Sensitive and cannot be delegated'. "
-        "Vulnerable to delegation attacks."
+    "Privileged account allows delegation": (
+        "AdminCount=1 but the account is not marked sensitive and non-delegable."
+    ),
+    "Privileged account not in Protected Users": (
+        "AdminCount=1 and no transitive Protected Users membership was found."
     ),
     "High-value target": (
         "Tier-0 / privileged objects. Their compromise = domain compromise."

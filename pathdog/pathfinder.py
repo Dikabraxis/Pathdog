@@ -4,10 +4,36 @@ from itertools import islice
 
 import networkx as nx
 
+from .commands import safe_command_component
 from .schema import SUPPORTED_TRAVERSABLE_EDGES
 from .weights import DEFAULT_WEIGHT
 
-_STRUCTURAL = {"MemberOf", "Contains"}
+_STRUCTURAL = {
+    "ClaimSpecialIdentity",
+    "Contains",
+    "ContainsIdentity",
+    "GPOAppliesTo",
+    "HasSIDHistory",
+    "MemberOf",
+    "PropagatesACEsTo",
+    "SyncedToADUser",
+    "SyncedToEntraUser",
+}
+
+
+def _property(props: dict, name: str, default=None):
+    lowered = {str(key).lower(): value for key, value in props.items()}
+    return lowered.get(name.lower(), default)
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes"}
+    return bool(value)
+
+
+def _enabled(props: dict) -> bool:
+    return _truthy(_property(props, "enabled", True))
 
 
 def _exploit_fingerprint(result: "PathResult") -> tuple:
@@ -256,10 +282,9 @@ def find_pivot_candidates(
 ) -> list[dict]:
     """Find principals that ALREADY have a path to DA and are compromisable.
 
-    These are the *true pivots*: out-of-band compromise of any of them
-    (Kerberoast, AS-REP roast, weak/empty password, LAPS read, AdminTo from
-    a host you control) hands you a node *inside* the DA subgraph — meaning
-    the existing graph paths from that node to DA become exploitable.
+    User roasting remains conditional on cracking the resulting material.
+    Computer vectors are emitted only when an owned source has a concrete
+    takeover path to the host; LAPS deployment alone is never a pivot.
 
     Returns [{
         "node": id,
@@ -267,9 +292,12 @@ def find_pivot_candidates(
         "vector_commands": list[str],
         "path_to_da": PathResult | None,
         "score": int,
+        "confidence": str,
+        "prerequisites": list[str],
     }, ...] sorted by score desc.
     """
     excluded_sources = excluded_sources or set()
+    full_attack = actionable_view(G)
     pruned_v = actionable_view(pruned)
     out: list[dict] = []
 
@@ -284,42 +312,95 @@ def find_pivot_candidates(
 
         vectors: list[str] = []
         cmds: list[str] = []
+        prerequisites: list[str] = []
         score = 0
+        confidence = "medium"
 
         # Out-of-band attack vectors
         if kind == "users":
+            if not _enabled(p):
+                continue
             short = name.split("@", 1)[0] if "@" in name else name.split(".")[0]
             d = name.rsplit("@", 1)[1] if "@" in name else "<DOMAIN>"
+            account = safe_command_component(short, "<TARGET_ACCOUNT>")
+            domain = safe_command_component(d, "<DOMAIN>")
 
-            if p.get("dontreqpreauth"):
+            if _truthy(_property(p, "dontreqpreauth")) and short.lower() not in {
+                "guest",
+                "krbtgt",
+            }:
                 vectors.append("AS-REP roast (no creds needed)")
+                prerequisites.append("Crack the AS-REP response to recover usable credentials.")
                 cmds.extend([
-                    f"impacket-GetNPUsers '{d}/' -no-pass -usersfile <(echo {short}) -dc-ip <DC_IP> -format hashcat -outputfile asrep.hash",
+                    f"impacket-GetNPUsers '{domain}/' -no-pass -usersfile <(echo {account}) -dc-ip <DC_IP> -format hashcat -outputfile asrep.hash",
                     "hashcat -m 18200 asrep.hash /usr/share/wordlists/rockyou.txt",
                 ])
                 score += 30
-            if p.get("hasspn") and short.lower() != "krbtgt":
+            if _truthy(_property(p, "hasspn")) and short.lower() not in {
+                "guest",
+                "krbtgt",
+            }:
                 vectors.append("Kerberoast")
+                prerequisites.append("Crack the service ticket to recover usable credentials.")
                 cmds.extend([
-                    f"impacket-GetUserSPNs '{d}/<owned_user>:<owned_pass>' -dc-ip <DC_IP> -request-user '{short}' -outputfile kerb.hash",
+                    f"impacket-GetUserSPNs '{domain}/<owned_user>:<owned_pass>' -dc-ip <DC_IP> -request-user '{account}' -outputfile kerb.hash",
                     "hashcat -m 13100 kerb.hash /usr/share/wordlists/rockyou.txt",
                 ])
                 score += 25
-            if p.get("passwordnotreqd"):
+            if _truthy(_property(p, "passwordnotreqd")):
                 vectors.append("PasswordNotRequired (try empty/weak)")
-                cmds.append(f"nxc smb <DC_IP> -d {d} -u '{short}' -p '' --no-bruteforce")
+                prerequisites.append("Validate that an empty or weak password is actually accepted.")
+                cmds.append(
+                    f"nxc smb <DC_IP> -d {domain} -u '{account}' -p '' --no-bruteforce"
+                )
                 score += 20
 
         elif kind == "computers":
-            if p.get("haslaps"):
-                vectors.append("LAPS — read local admin password if you can")
+            takeover_relations: set[str] = set()
+            for owned_source in excluded_sources:
+                if owned_source not in G or owned_source not in full_attack:
+                    continue
+                try:
+                    owned_path = nx.dijkstra_path(
+                        full_attack, owned_source, nid, weight="weight"
+                    )
+                except (nx.NetworkXNoPath, nx.NodeNotFound):
+                    continue
+                if len(owned_path) > 1:
+                    terminal = full_attack[owned_path[-2]][owned_path[-1]].get(
+                        "relation", "Unknown"
+                    )
+                    takeover_relations.add(terminal)
+
+            laps_relations = {"ReadLAPSPassword", "SyncLAPSPassword"}
+            host_control_relations = {
+                "AdminTo",
+                "CanPSRemote",
+                "ExecuteDCOM",
+                "GenericAll",
+                "GenericWrite",
+                "ReadLAPSPassword",
+                "SyncLAPSPassword",
+            }
+            if _truthy(_property(p, "haslaps")) and takeover_relations & laps_relations:
+                computer = safe_command_component(
+                    name.split(".")[0], "<TARGET_COMPUTER>"
+                )
+                vectors.append("Confirmed LAPS password read from an owned principal")
                 cmds.append(
                     f"impacket-GetLAPSPassword '<DOMAIN>/<owned_user>:<owned_pass>@<DC_IP>' "
-                    f"-computer '{name.split('.')[0]}'"
+                    f"-computer '{computer}'"
                 )
-                score += 15
-            if p.get("unconstraineddelegation"):
-                vectors.append("Unconstrained delegation — get local admin then capture DC TGT")
+                prerequisites.append("Authenticate as the owned principal shown in the inbound path.")
+                confidence = "high"
+                score += 30
+            if (
+                _truthy(_property(p, "unconstraineddelegation"))
+                and takeover_relations & host_control_relations
+            ):
+                vectors.append("Controlled host with unconstrained delegation")
+                prerequisites.append("Obtain SYSTEM and coerce a privileged authentication to the host.")
+                confidence = "high"
                 score += 25
 
         # Position-based score boost
@@ -350,6 +431,8 @@ def find_pivot_candidates(
             "vector_commands": cmds,
             "path_to_da": ptd,
             "score": score,
+            "confidence": confidence,
+            "prerequisites": prerequisites,
         })
 
     out.sort(key=lambda x: -x["score"])
@@ -527,7 +610,7 @@ def suggest_similar_nodes(G: nx.DiGraph, query: str, top_n: int = 3) -> list[str
     Falls back to all node types if not enough user matches.
     """
     try:
-        from thefuzz import process as fuzz_process
+        from rapidfuzz import process as fuzz_process
 
         def _candidates(kind_filter: str | None) -> dict[str, str]:
             result: dict[str, str] = {}

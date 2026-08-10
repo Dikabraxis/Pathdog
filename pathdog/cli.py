@@ -1,0 +1,748 @@
+"""pathdog — BloodHound attack path analyzer CLI."""
+
+import argparse
+import os
+import sys
+from datetime import datetime, timezone
+
+from pathdog import __version__
+from pathdog.compat import analyze_compatibility, render_compatibility
+from pathdog.graph import (
+    build_graph,
+    graph_stats,
+    prune_to_target,
+    resolve_target,
+    target_candidates,
+)
+from pathdog.json_export import build_json_report, write_json_report
+from pathdog.loader import load_zip_detailed
+from pathdog.pathfinder import (
+    find_inbound_object_control,
+    find_inbound_sources,
+    find_intermediate_targets,
+    find_outbound_object_control,
+    find_paths,
+    find_pivot_candidates,
+    suggest_similar_nodes,
+)
+from pathdog.quickwins import collect_all as collect_quickwins
+from pathdog.report import (
+    print_findings_console,
+    print_intermediate_targets,
+    print_node_visibility_console,
+    print_owned_object_control,
+    print_paths_console,
+    print_pivot_candidates,
+    print_quickwins,
+    render_html_combined,
+    render_html_multi,
+    render_html_node_visibility,
+    render_markdown_multi,
+    render_markdown_node_visibility,
+)
+from pathdog.triage import collect_findings
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="pathdog",
+        description="Analyze BloodHound ZIP exports to find attack paths to Domain Admin.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+examples:
+  pathdog -z corp.zip -u john.doe@corp.local
+  pathdog -z dump1.zip dump2.zip -u john@corp.local svc_backup@corp.local
+  pathdog -z dump1.zip dump2.zip -u owned_users.txt -k 5 -f html -v
+  pathdog -z corp.zip --triage -f both --export-json
+  pathdog -z corp.zip --list users
+  pathdog -z corp.zip --node svc_backup@corp.local
+  pathdog -z corp.zip -u john.doe@corp.local --node svc_backup@corp.local -f html --export-json
+        """,
+    )
+    p.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+    p.add_argument("-z", "--zip", required=True, metavar="FILE", nargs="+",
+                   dest="zips", help="BloodHound ZIP export(s), e.g. -z a.zip b.zip")
+    p.add_argument("-u", "--user", metavar="USER", nargs="+", default=[],
+                   dest="users",
+                   help="Owned user(s) or a .txt file with one user per line")
+    p.add_argument("-t", "--target", default=None, metavar="TARGET",
+                   help="Target node — default: auto-detect DOMAIN ADMINS")
+    p.add_argument("-k", "--paths", type=int, default=3, metavar="K",
+                   help="Number of paths to find per user (default: 3)")
+    p.add_argument("-o", "--output", default="pathdog_report", metavar="BASENAME",
+                   help="Output file base name (default: pathdog_report)")
+    p.add_argument("-f", "--format", choices=["md", "html", "both"], default="html",
+                   dest="fmt", help="Output format (default: html)")
+    p.add_argument("-l", "--list", metavar="KIND", nargs="?", const="all",
+                   dest="list_kind",
+                   help="List nodes and exit. KIND includes AD, GPO, container and PKI object types")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="Show graph statistics")
+    p.add_argument("--triage", action="store_true",
+                   help="Run global prioritized triage without requiring -u")
+    p.add_argument("--export-json", nargs="?", const="", metavar="FILE",
+                   help="Write a structured JSON report. Optional FILE defaults to <output>.json")
+    p.add_argument("--no-fallback", action="store_true",
+                   help="Disable intermediate-target suggestions when no DA path is found")
+    p.add_argument("--no-quickwins", action="store_true",
+                   help="Disable domain-wide quick-wins scan (AS-REP, Kerberoast, etc.)")
+    p.add_argument("--no-pivots", action="store_true",
+                   help="Disable pivot-candidate scan (principals with a path to DA, attackable out-of-band)")
+    p.add_argument("--fallback-top", type=int, default=10, metavar="N",
+                   help="Max intermediate targets per user (default: 10)")
+    p.add_argument("--pivots-top", type=int, default=15, metavar="N",
+                   help="Max pivot candidates to surface (default: 15)")
+    p.add_argument("--node", metavar="NODE", default=None,
+                   help="Show outbound (what this node can reach) and inbound "
+                        "(who can reach this node) path visibility — no -u required")
+    p.add_argument(
+        "--compat",
+        action="store_true",
+        help="Report SharpHound/BloodHound schema compatibility and exit",
+    )
+    return p
+
+
+def _expand_users(raw: list[str]) -> tuple[list[str], int]:
+    """Expand .txt files into user lists. Returns (users, exit_code)."""
+    users: list[str] = []
+    for entry in raw:
+        if entry.lower().endswith(".txt"):
+            try:
+                with open(entry, encoding="utf-8") as fh:
+                    from_file = [
+                        line.strip() for line in fh
+                        if line.strip() and not line.lstrip().startswith("#")
+                    ]
+                print(f"[*] Loaded {len(from_file)} user(s) from {entry}")
+                users.extend(from_file)
+            except OSError as exc:
+                print(f"[!] Cannot read user file '{entry}': {exc}", file=sys.stderr)
+                return [], 1
+        else:
+            users.append(entry)
+    return users, 0
+
+
+def _load_graph(zips: list[str]) -> tuple | None:
+    """Load ZIPs. Returns (nodes, edges, collection metadata) or None."""
+    all_nodes: list[dict] = []
+    all_edges: list[dict] = []
+    collections = []
+    for zip_path in zips:
+        print(f"[*] Loading {zip_path} ...")
+        try:
+            loaded = load_zip_detailed(zip_path)
+        except ValueError as exc:
+            print(f"[!] {exc}", file=sys.stderr)
+            return None
+        print(f"    → {len(loaded.nodes)} nodes, {len(loaded.edges)} edges")
+        all_nodes.extend(loaded.nodes)
+        all_edges.extend(loaded.edges)
+        collections.append(loaded.metadata)
+    if len(zips) > 1:
+        print(f"[*] Merged: {len(all_nodes)} nodes, {len(all_edges)} edges (before dedup)")
+    return all_nodes, all_edges, collections
+
+
+def _source_candidates(G, user: str) -> tuple[list[str], bool]:
+    """Return exact candidates first, otherwise all partial candidates."""
+    user_lower = user.lower()
+    exact: list[str] = []
+    for nid in G.nodes:
+        if user_lower == str(nid).lower():
+            exact.append(nid)
+            continue
+        name = G.nodes[nid].get("name", "")
+        if user_lower == name.lower():
+            exact.append(nid)
+    if exact:
+        return sorted(set(exact)), True
+
+    partial: list[str] = []
+    for nid in G.nodes:
+        if user_lower in str(nid).lower():
+            partial.append(nid)
+            continue
+        name = G.nodes[nid].get("name", "")
+        if name and user_lower in name.lower():
+            partial.append(nid)
+    return sorted(set(partial)), False
+
+
+def _resolve_source(G, user: str):
+    """Resolve a source only when its exact or partial match is unique."""
+    candidates, exact = _source_candidates(G, user)
+    return (candidates[0], exact) if len(candidates) == 1 else (None, False)
+
+
+def _print_source_matches(G, user: str) -> bool:
+    candidates, _ = _source_candidates(G, user)
+    if len(candidates) <= 1:
+        return False
+    print("    Matching nodes (use an exact name or SID):", file=sys.stderr)
+    for candidate in candidates:
+        print(
+            f"      - {G.nodes[candidate].get('name', candidate)} ({candidate})",
+            file=sys.stderr,
+        )
+    return True
+
+
+def _do_list(G, kind: str) -> None:
+    """Print nodes filtered by kind and exit."""
+    kinds = {
+        "all", "users", "computers", "groups", "domains", "gpos", "ous",
+        "containers", "certtemplates", "enterprisecas", "rootcas",
+        "aiacas", "ntauthstores", "issuancepolicies",
+    }
+    if kind not in kinds:
+        print(f"[!] Unknown kind '{kind}'. Choose from: {', '.join(sorted(kinds))}",
+              file=sys.stderr)
+        sys.exit(1)
+
+    print(f"\n{'Node ID':<60} {'Kind':<12} Name")
+    print("─" * 100)
+    count = 0
+    for nid in sorted(G.nodes):
+        node_kind = G.nodes[nid].get("kind", "unknown")
+        if kind != "all" and node_kind != kind:
+            continue
+        name = G.nodes[nid].get("name", "")
+        display_id = nid if len(nid) <= 58 else nid[:55] + "..."
+        print(f"{display_id:<60} {node_kind:<12} {name}")
+        count += 1
+    print(f"\n{count} node(s) listed.")
+
+
+def _collect_node_data(G, args) -> dict | None:
+    """Collect all node visibility data. Returns a dict or None if node not found."""
+    node_id, exact = _resolve_source(G, args.node)
+    if not node_id:
+        print(f"[!] Node '{args.node}' not found or ambiguous.", file=sys.stderr)
+        ambiguous = _print_source_matches(G, args.node)
+        suggestions = [] if ambiguous else suggest_similar_nodes(G, args.node, top_n=3)
+        if suggestions:
+            print("    Did you mean one of:", file=sys.stderr)
+            for s in suggestions:
+                print(f"      - {s}", file=sys.stderr)
+        return None
+    if not exact:
+        print(f"[~] Fuzzy match for '{args.node}' → '{node_id}'")
+    print(f"[*] Node visibility for: {node_id}")
+
+    target = resolve_target(G, args.target, source=node_id)
+    if args.target and not target:
+        print(f"[!] Target '{args.target}' not found — outbound will show intermediate targets.",
+              file=sys.stderr)
+    elif target:
+        print(f"[*] Outbound target: {target}")
+
+    outbound_paths: list = []
+    outbound_intermediate: list[dict] = []
+    pruned = None
+
+    if target:
+        pruned = prune_to_target(G, target)
+        if node_id in pruned:
+            print("[*] Computing outbound paths ...")
+            try:
+                outbound_paths = find_paths(pruned, node_id, target, k=args.paths)
+            except ValueError:
+                pass
+        print("[*] Computing reachable high-value targets ...")
+        outbound_intermediate = find_intermediate_targets(
+            G, node_id, excluded={target}, top_n=args.fallback_top,
+        )
+    else:
+        outbound_intermediate = find_intermediate_targets(
+            G, node_id, excluded=set(), top_n=args.fallback_top,
+        )
+
+    print("[*] Computing inbound paths ...")
+    inbound_sources = find_inbound_sources(G, node_id, top_n=10)
+    if inbound_sources:
+        print(f"[*] Inbound: {len(inbound_sources)} principal(s) with a path to this node")
+
+    print("[*] Computing object control ...")
+    outbound_control = find_outbound_object_control(G, node_id)
+    inbound_control = find_inbound_object_control(G, node_id)
+    if outbound_control:
+        direct = sum(1 for e in outbound_control if e["via_group"] is None)
+        print(f"[*] Outbound control: {direct} direct, "
+              f"{len(outbound_control) - direct} via group(s)")
+
+    node_stats = None
+    if args.verbose and pruned is not None:
+        node_stats = graph_stats(G, pruned)
+
+    return {
+        "node_id": node_id,
+        "target": target,
+        "outbound_paths": outbound_paths,
+        "outbound_intermediate": outbound_intermediate,
+        "inbound_sources": inbound_sources,
+        "outbound_control": outbound_control,
+        "inbound_control": inbound_control,
+        "stats": node_stats,
+    }
+
+
+def _do_node_visibility(G, args) -> int:
+    """Handle standalone --node mode: collect data, print console, write report."""
+    data = _collect_node_data(G, args)
+    if data is None:
+        return 1
+
+    print_node_visibility_console(
+        G, data["node_id"], data["target"],
+        data["outbound_paths"], data["outbound_intermediate"],
+        data["inbound_sources"], data["outbound_control"], data["inbound_control"],
+    )
+
+    base = _resolve_output_base(args)
+    written = _write_reports(
+        args, base,
+        render_md=lambda: render_markdown_node_visibility(
+            G, data["node_id"], data["target"],
+            data["outbound_paths"], data["outbound_intermediate"],
+            data["inbound_sources"], data["stats"],
+            data["outbound_control"], data["inbound_control"],
+        ),
+        render_html=lambda: render_html_node_visibility(
+            G, data["node_id"], data["target"],
+            data["outbound_paths"], data["outbound_intermediate"],
+            data["inbound_sources"], data["stats"],
+            data["outbound_control"], data["inbound_control"],
+        ),
+        build_json=lambda: build_json_report(
+            G=G, target=data["target"], results=[], stats=data["stats"],
+            node_data=data,
+        ),
+    )
+
+    if written:
+        print(f"\n[+] Report(s) written: {', '.join(written)}")
+
+    return 0
+
+
+def _collect_triage_data(G, args) -> dict:
+    """Collect global triage data without deciding how it is rendered."""
+    target = resolve_target(G, args.target)
+    if target:
+        print(f"[*] Triage target context: {target}")
+        pruned = prune_to_target(G, target)
+        stats = graph_stats(G, pruned)
+    else:
+        target = args.target or ""
+        stats = {
+            "total_nodes": G.number_of_nodes(),
+            "total_edges": G.number_of_edges(),
+            "pruned_nodes": G.number_of_nodes(),
+            "pruned_edges": G.number_of_edges(),
+            "reduction_pct": 0.0,
+        }
+        if args.target:
+            print(f"[!] Target '{args.target}' not found — triage will still run.",
+                  file=sys.stderr)
+
+    print("[*] Running global triage ...")
+    quickwins = {} if args.no_quickwins else collect_quickwins(G)
+    findings = collect_findings(G, quickwins=quickwins)
+
+    if findings:
+        print(f"[*] Findings: {len(findings)} prioritized item(s)")
+        print_findings_console(findings)
+    if quickwins:
+        total = sum(len(v) for v in quickwins.values())
+        print(f"[*] Quick wins: {total} finding(s) across {len(quickwins)} categor(ies)")
+        print_quickwins(G, quickwins)
+
+    return {
+        "target": target,
+        "stats": stats,
+        "quickwins": quickwins,
+        "findings": findings,
+    }
+
+
+def _write_standalone_triage_report(G, args, triage_data: dict) -> tuple[list[str], str]:
+    """Write a triage-only report and return (written_paths, base)."""
+    base = _resolve_output_base(args)
+    report_stats = triage_data["stats"] if args.verbose else None
+    target = triage_data["target"]
+    quickwins = triage_data["quickwins"]
+    findings = triage_data["findings"]
+
+    written = _write_reports(
+        args, base,
+        render_md=lambda: render_markdown_multi(
+            [], G, target, report_stats,
+            quickwins=quickwins, findings=findings,
+        ),
+        render_html=lambda: render_html_multi(
+            [], G, target, report_stats,
+            quickwins=quickwins, findings=findings,
+        ),
+        build_json=lambda: build_json_report(
+            G=G, target=target, results=[], stats=triage_data["stats"],
+            quickwins=quickwins, findings=findings,
+        ),
+    )
+
+    return written, base
+
+
+def _write_triage_node_combined(G, args, triage_data: dict, node_data: dict) -> list[str]:
+    """Write a triage + node-visibility combined report (no -u case)."""
+    base = _resolve_output_base(args)
+    report_stats = triage_data["stats"] if args.verbose else None
+    target = triage_data["target"]
+    quickwins = triage_data["quickwins"]
+    findings = triage_data["findings"]
+
+    def _md() -> str:
+        triage_md = render_markdown_multi(
+            [], G, target, report_stats,
+            quickwins=quickwins, findings=findings,
+        )
+        node_md = render_markdown_node_visibility(
+            G, node_data["node_id"], node_data["target"],
+            node_data["outbound_paths"], node_data["outbound_intermediate"],
+            node_data["inbound_sources"], node_data["stats"],
+            node_data["outbound_control"], node_data["inbound_control"],
+        )
+        return f"{triage_md}\n\n---\n\n{node_md}"
+
+    return _write_reports(
+        args, base,
+        render_md=_md,
+        render_html=lambda: render_html_combined(
+            [], G, target, node_data, report_stats,
+            quickwins=quickwins, findings=findings,
+        ),
+        build_json=lambda: build_json_report(
+            G=G, target=target, results=[], stats=triage_data["stats"],
+            quickwins=quickwins, findings=findings, node_data=node_data,
+        ),
+    )
+
+
+def _json_path(args, base: str) -> str | None:
+    """Return JSON output path, or None when JSON export is disabled."""
+    if args.export_json is None:
+        return None
+    return args.export_json or f"{base}.json"
+
+
+def _resolve_output_base(args) -> str:
+    """Pick output basename, suffixing with a timestamp if a target file exists."""
+    base = args.output
+    extensions = [e for e in (".md", ".html") if args.fmt in (e[1:], "both")]
+    if any(os.path.exists(f"{base}{ext}") for ext in extensions):
+        base = f"{base}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    return base
+
+
+def _write_reports(
+    args,
+    base: str,
+    *,
+    render_md=None,
+    render_html=None,
+    build_json=None,
+) -> list[str]:
+    """Write the requested formats. Renderers are callables so unused formats
+    don't pay the rendering cost."""
+    written: list[str] = []
+    if args.fmt in ("md", "both") and render_md is not None:
+        path = f"{base}.md"
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(render_md())
+        written.append(path)
+    if args.fmt in ("html", "both") and render_html is not None:
+        path = f"{base}.html"
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(render_html())
+        written.append(path)
+    json_path = _json_path(args, base)
+    if json_path and build_json is not None:
+        write_json_report(json_path, build_json())
+        written.append(json_path)
+    return written
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    # ── Load & merge all ZIPs ─────────────────────────────────────────────────
+    result = _load_graph(args.zips)
+    if result is None:
+        return 1
+    all_nodes, all_edges, collections = result
+
+    print("[*] Building graph ...")
+    G = build_graph(all_nodes, all_edges)
+    print(f"[*] Graph: {G.number_of_nodes()} unique nodes, {G.number_of_edges()} unique edges")
+
+    compatibility = analyze_compatibility(G, collections)
+    if compatibility.collection_span_days is not None and compatibility.collection_span_days > 30:
+        print(
+            "[warn] Collections span "
+            f"{compatibility.collection_span_days} days; merged paths may combine "
+            "stale relationships.",
+            file=sys.stderr,
+        )
+
+    if args.compat:
+        print()
+        print(render_compatibility(compatibility))
+        if args.export_json is not None:
+            json_path = args.export_json or "pathdog_compat.json"
+            write_json_report(json_path, compatibility.to_dict())
+            print(f"\n[+] Compatibility JSON written: {json_path}")
+        return 0 if compatibility.compatible else 3
+
+    # ── --list mode (no -u required) ──────────────────────────────────────────
+    if args.list_kind:
+        _do_list(G, args.list_kind)
+        return 0
+
+    # ── --triage can run standalone or be combined with -u / --node ──────────
+    triage_data = _collect_triage_data(G, args) if args.triage else None
+    if args.triage and not args.users and not args.node:
+        written, _ = _write_standalone_triage_report(G, args, triage_data)
+        if written:
+            print(f"\n[+] Report(s) written: {', '.join(written)}")
+        return 0 if triage_data["findings"] or triage_data["quickwins"] else 2
+
+    # ── --node mode: collect data (standalone) or store for combined report ────
+    node_data = None
+    if args.node:
+        if not args.users and not args.triage:
+            return _do_node_visibility(G, args)
+        node_data = _collect_node_data(G, args)
+        if node_data:
+            print_node_visibility_console(
+                G, node_data["node_id"], node_data["target"],
+                node_data["outbound_paths"], node_data["outbound_intermediate"],
+                node_data["inbound_sources"], node_data["outbound_control"],
+                node_data["inbound_control"],
+            )
+            print()
+
+    # ── Validate -u is provided for path-finding ──────────────────────────────
+    if not args.users:
+        if args.triage and node_data:
+            written = _write_triage_node_combined(G, args, triage_data, node_data)
+            if written:
+                print(f"\n[+] Report(s) written: {', '.join(written)}")
+            return 0 if (
+                triage_data["findings"] or triage_data["quickwins"] or node_data
+            ) else 2
+        parser.error("argument -u/--user is required unless --list, --triage, or --node is used")
+
+    # ── Expand user list ──────────────────────────────────────────────────────
+    users, rc = _expand_users(args.users)
+    if rc:
+        return rc
+    if not users:
+        print("[!] No owned users provided.", file=sys.stderr)
+        return 1
+
+    # ── Resolve owned users ───────────────────────────────────────────────────
+    sources: list[str] = []
+    for user in users:
+        source, exact = _resolve_source(G, user)
+        if not source:
+            print(f"[!] User '{user}' not found or ambiguous.", file=sys.stderr)
+            ambiguous = _print_source_matches(G, user)
+            suggestions = [] if ambiguous else suggest_similar_nodes(G, user, top_n=3)
+            if suggestions:
+                print("    Did you mean one of:", file=sys.stderr)
+                for s in suggestions:
+                    print(f"      - {s}", file=sys.stderr)
+            continue
+        if not exact:
+            print(f"[~] Fuzzy match for '{user}' → '{source}'")
+        print(f"[*] Owned user: {source}")
+        sources.append(source)
+
+    if not sources:
+        print("[!] No valid owned users found. Aborting.", file=sys.stderr)
+        return 1
+
+    # ── Resolve target ────────────────────────────────────────────────────────
+    if args.target:
+        target = resolve_target(G, args.target)
+    else:
+        per_source = [resolve_target(G, None, source=source) for source in sources]
+        resolved_targets = {candidate for candidate in per_source if candidate}
+        target = (
+            next(iter(resolved_targets))
+            if len(resolved_targets) == 1 and all(per_source)
+            else resolve_target(G, None)
+        )
+    if not target:
+        hint = args.target or "DOMAIN ADMINS"
+        candidates = target_candidates(G, args.target)
+        print(
+            f"[!] Target '{hint}' is missing or ambiguous.",
+            file=sys.stderr,
+        )
+        if candidates:
+            print("    Matching targets:", file=sys.stderr)
+            for candidate in candidates:
+                print(
+                    f"      - {G.nodes[candidate].get('name', candidate)} ({candidate})",
+                    file=sys.stderr,
+                )
+        print("    Specify --target with an exact name or SID.", file=sys.stderr)
+        return 1
+    print(f"[*] Target node: {target}")
+
+    # ── Prune graph ───────────────────────────────────────────────────────────
+    print("[*] Pruning graph to ancestors of target ...")
+    pruned = prune_to_target(G, target)
+    stats = graph_stats(G, pruned)
+    print(f"[*] Pruned: {stats['pruned_nodes']} nodes, {stats['pruned_edges']} edges "
+          f"({stats['reduction_pct']}% reduction)")
+
+    if args.verbose:
+        print(
+            f"[v] Full stats — total: {stats['total_nodes']} nodes / "
+            f"{stats['total_edges']} edges | "
+            f"pruned: {stats['pruned_nodes']} / {stats['pruned_edges']}"
+        )
+
+    # ── Find paths ────────────────────────────────────────────────────────────
+    all_results: list[tuple[str, list]] = []
+    intermediates: dict[str, list[dict]] = {}
+    outbound_controls: dict[str, list[dict]] = {}
+    any_path_found = False
+
+    for source in sources:
+        outbound_controls[source] = find_outbound_object_control(G, source)
+        if source not in pruned:
+            src_display = G.nodes[source].get("name", source)
+            print(f"\n[!] No path from '{src_display}' — not connected to DA subgraph.")
+            all_results.append((source, []))
+            if not args.no_fallback:
+                intermediates[source] = find_intermediate_targets(
+                    G, source, excluded={target}, top_n=args.fallback_top,
+                )
+            continue
+
+        print(f"[*] Computing up to {args.paths} path(s) from {source} ...")
+        try:
+            paths = find_paths(pruned, source, target, k=args.paths)
+        except ValueError as exc:
+            print(f"[!] {exc}", file=sys.stderr)
+            all_results.append((source, []))
+            continue
+
+        if paths:
+            any_path_found = True
+        if not args.no_fallback:
+            intermediates[source] = find_intermediate_targets(
+                G, source, excluded={target}, top_n=args.fallback_top,
+            )
+        all_results.append((source, paths))
+
+    # ── Triage is opt-in for attack-path mode ────────────────────────────────
+    quickwins = triage_data["quickwins"] if triage_data else None
+    findings = triage_data["findings"] if triage_data else []
+
+    # ── Pivot candidates (principals in DA-subgraph attackable out-of-band) ───
+    pivots: list[dict] = []
+    if not args.no_pivots:
+        print("[*] Scanning pivot candidates (path to DA + out-of-band vectors) ...")
+        pivots = find_pivot_candidates(
+            G, target, pruned,
+            top_n=args.pivots_top,
+            excluded_sources=set(sources),
+        )
+        if pivots:
+            print(f"[*] Pivot candidates: {len(pivots)} principal(s) with a path to DA + a compromise vector")
+
+    # ── Console output ────────────────────────────────────────────────────────
+    for source, paths in all_results:
+        if len(sources) > 1:
+            src_label = G.nodes[source].get("name", source)
+            print(f"\n{'═' * 60}")
+            print(f"  Owned user: {src_label}")
+            print(f"{'═' * 60}")
+        print_paths_console(paths, G, source, target)
+        print_owned_object_control(G, outbound_controls.get(source, []))
+        if source in intermediates:
+            print_intermediate_targets(G, source, intermediates[source])
+
+    if pivots:
+        print_pivot_candidates(G, pivots)
+
+    if triage_data and findings:
+        print_findings_console(findings)
+
+    if triage_data and quickwins:
+        print_quickwins(G, quickwins)
+
+    # ── Write reports ─────────────────────────────────────────────────────────
+    report_stats = stats if args.verbose else None
+    qw_for_report = quickwins if triage_data else None
+    fd_for_report = findings if triage_data else None
+
+    def _render_html() -> str:
+        if node_data:
+            return render_html_combined(
+                all_results, G, target, node_data, report_stats,
+                intermediates=intermediates,
+                outbound_controls=outbound_controls,
+                quickwins=qw_for_report,
+                pivots=pivots,
+                findings=fd_for_report,
+            )
+        return render_html_multi(
+            all_results, G, target, report_stats,
+            intermediates=intermediates,
+            outbound_controls=outbound_controls,
+            quickwins=qw_for_report,
+            pivots=pivots,
+            findings=fd_for_report,
+        )
+
+    base = _resolve_output_base(args)
+    written = _write_reports(
+        args, base,
+        render_md=lambda: render_markdown_multi(
+            all_results, G, target, report_stats,
+            intermediates=intermediates, quickwins=qw_for_report,
+            outbound_controls=outbound_controls,
+            pivots=pivots, findings=fd_for_report,
+        ),
+        render_html=_render_html,
+        build_json=lambda: build_json_report(
+            G=G, target=target, results=all_results, stats=stats,
+            intermediates=intermediates,
+            outbound_controls=outbound_controls,
+            quickwins=qw_for_report,
+            pivots=pivots,
+            findings=fd_for_report,
+            node_data=node_data,
+        ),
+    )
+
+    if written:
+        print(f"\n[+] Report(s) written: {', '.join(written)}")
+
+    # Exit 0 = paths found, 2 = ran OK but no paths
+    return 0 if any_path_found else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

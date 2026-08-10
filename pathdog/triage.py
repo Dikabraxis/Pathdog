@@ -6,14 +6,14 @@ from .commands import get_commands
 from .findings import Finding
 from .quickwins import collect_all
 
-
 SEVERITY_BY_CATEGORY = {
     "ADCS": 10,
     "DCSync": 10,
     "Dangerous ACL": 9,
     "Unconstrained delegation": 8,
     "Password not required": 8,
-    "Privileged user not protected": 7,
+    "Privileged account allows delegation": 7,
+    "Privileged account not in Protected Users": 7,
     "AS-REP roast": 6,
     "Kerberoast": 6,
     "LAPS in use": 5,

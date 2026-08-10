@@ -4,17 +4,47 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   tests:
+    name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
+          cache: pip
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install .
       - name: Run tests
-        run: python -m unittest discover -s tests
+        run: python -m unittest discover -s tests -v
+
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install development dependencies
+        run: python -m pip install ".[dev]"
+      - name: Lint
+        run: ruff check pathdog pathdog.py tests
+      - name: Build distributions
+        run: python -m build
+      - name: Verify wheel installation
+        run: |
+          python -m pip install --force-reinstall dist/*.whl
+          pathdog --help
+      - name: Audit runtime dependencies
+        run: pip-audit --requirement requirements.txt

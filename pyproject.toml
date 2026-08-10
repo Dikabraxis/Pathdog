@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pathdog"
+version = "1.1.0"
+description = "Fail-closed BloodHound ZIP attack-path analyzer without Neo4j"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Dikabraxis" }]
+keywords = ["active-directory", "bloodhound", "pentest", "sharphound"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Security",
+]
+dependencies = [
+  "networkx>=3.6.1,<4",
+  "rapidfuzz>=3.14,<4",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.3,<2",
+  "pip-audit>=2.9,<3",
+  "ruff>=0.16,<1",
+]
+
+[project.scripts]
+pathdog = "pathdog.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Dikabraxis/Pathdog"
+Issues = "https://github.com/Dikabraxis/Pathdog/issues"
+
+[tool.setuptools.package-data]
+pathdog = ["data/*.json"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

@@ -8,12 +8,21 @@ from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from pathdog.commands import get_commands
+from pathdog.cli import _resolve_source
+from pathdog.commands import get_commands, quote_posix, quote_powershell
+from pathdog.compat import analyze_compatibility
 from pathdog.explanations import for_quickwin
-from pathdog.graph import build_graph, build_raw_graph, prune_to_target
-from pathdog.loader import load_zip
-from pathdog.pathfinder import actionable_view, find_paths
+from pathdog.graph import (
+    build_graph,
+    build_raw_graph,
+    prune_to_target,
+    resolve_target,
+    target_candidates,
+)
+from pathdog.loader import ZipSafetyLimits, load_zip, load_zip_detailed
+from pathdog.pathfinder import actionable_view, find_paths, find_pivot_candidates
 from pathdog.quickwins import collect_all
+from pathdog.schema import TRAVERSABLE_EDGES
 from pathdog.triage import collect_findings
 from pathdog.weights import EDGE_WEIGHTS
 
@@ -61,6 +70,275 @@ def base_files(extra_rels=None, extra_files=None):
 
 
 class CoreTests(unittest.TestCase):
+    def test_loader_adds_explicit_and_embedded_relationship_sources(self):
+        with TemporaryDirectory() as tmp:
+            zpath = Path(tmp) / "combined.zip"
+            files = base_files()
+            files["groups.json"] = {
+                "meta": {"type": "groups"},
+                "data": [
+                    {
+                        **node("DA", "DOMAIN ADMINS@corp.local", highvalue=True),
+                        "Members": [{"ObjectIdentifier": "U1"}],
+                    }
+                ],
+                "rels": [
+                    {
+                        "StartNode": "U2",
+                        "EndNode": "DA",
+                        "RelationshipType": "GenericWrite",
+                    }
+                ],
+            }
+            write_bh_zip(zpath, files)
+            _, edges = load_zip(str(zpath))
+            triples = {(edge["src"], edge["dst"], edge["type"]) for edge in edges}
+            self.assertIn(("U1", "DA", "MemberOf"), triples)
+            self.assertIn(("U2", "DA", "GenericWrite"), triples)
+
+    def test_loader_rejects_archive_over_configured_size_limit(self):
+        with TemporaryDirectory() as tmp:
+            zpath = write_bh_zip(Path(tmp) / "large.zip", base_files())
+            with self.assertRaisesRegex(ValueError, "per-file safety limit"):
+                load_zip_detailed(
+                    str(zpath),
+                    limits=ZipSafetyLimits(max_file_size=10),
+                )
+
+    def test_loader_collects_version_and_timestamp_metadata(self):
+        with TemporaryDirectory() as tmp:
+            zpath = Path(tmp) / "metadata.zip"
+            write_bh_zip(
+                zpath,
+                {
+                    "20260810112233_users.json": {
+                        "meta": {"type": "users", "version": "2.14.0"},
+                        "data": [node("U1", "alice@corp.local")],
+                    }
+                },
+            )
+            with redirect_stderr(StringIO()):
+                loaded = load_zip_detailed(str(zpath))
+            self.assertEqual(loaded.metadata.collector_versions, {"2.14.0"})
+            self.assertEqual(
+                loaded.metadata.earliest.isoformat(),
+                "2026-08-10T11:22:33+00:00",
+            )
+
+    def test_loader_models_current_bloodhound_trust_semantics(self):
+        with TemporaryDirectory() as tmp:
+            zpath = Path(tmp) / "trusts.zip"
+            files = base_files()
+            files["domains.json"]["data"] = [
+                node("D2", "child.corp.local", functionallevel="2016"),
+                {
+                    **node("D1", "corp.local"),
+                    "Trusts": [
+                    {
+                        "TargetDomainSid": "D2",
+                        "TargetDomainName": "child.corp.local",
+                        "TrustDirection": "Bidirectional",
+                        "TrustType": "ParentChild",
+                        "SidFilteringEnabled": False,
+                        "TGTDelegationEnabled": True,
+                    },
+                    {
+                        "TargetDomainSid": "D3",
+                        "TargetDomainName": "external.local",
+                        "TrustDirection": "Outbound",
+                        "TrustType": "Forest",
+                        "SidFilteringEnabled": False,
+                        "TGTDelegationEnabled": False,
+                    },
+                    {
+                        "TargetDomainSid": "D4",
+                        "TargetDomainName": "partner.local",
+                        "TrustDirection": "Inbound",
+                        "TrustType": "External",
+                        "SidFilteringEnabled": True,
+                        "TGTDelegationEnabled": True,
+                    },
+                    ],
+                },
+            ]
+            write_bh_zip(zpath, files)
+            loaded = load_zip_detailed(str(zpath))
+            graph = build_graph(loaded.nodes, loaded.edges)
+
+            self.assertEqual(graph.nodes["D2"]["kind"], "domains")
+            self.assertEqual(graph.nodes["D2"]["name"], "child.corp.local")
+            self.assertEqual(graph.nodes["D2"]["props"]["functionallevel"], "2016")
+            self.assertIn("SameForestTrust", graph["D1"]["D2"]["relations"])
+            self.assertIn("SameForestTrust", graph["D2"]["D1"]["relations"])
+            self.assertIn("CrossForestTrust", graph["D1"]["D3"]["relations"])
+            self.assertIn("SpoofSIDHistory", graph["D3"]["D1"]["relations"])
+            self.assertIn("AbuseTGTDelegation", graph["D4"]["D1"]["relations"])
+
+            attack = actionable_view(graph)
+            self.assertFalse(attack.has_edge("D1", "D3"))
+            self.assertEqual(
+                attack["D3"]["D1"]["relation"], "SpoofSIDHistory"
+            )
+
+    def test_compatibility_reports_unknown_edges(self):
+        nodes = [
+            {"id": "U1", "kind": "users", "props": {"name": "alice@corp.local"}},
+            {"id": "D1", "kind": "domains", "props": {"name": "corp.local"}},
+        ]
+        with redirect_stderr(StringIO()):
+            graph = build_graph(
+                nodes,
+                [{"src": "U1", "dst": "D1", "type": "FutureUnknownEdge"}],
+            )
+        report = analyze_compatibility(graph)
+        self.assertFalse(report.compatible)
+        self.assertEqual(report.unknown_edges, ["FutureUnknownEdge"])
+
+    def test_target_resolution_is_safe_in_multiple_domains(self):
+        nodes = [
+            {
+                "id": "U1",
+                "kind": "users",
+                "props": {"name": "alice@child.corp.local"},
+            },
+            {
+                "id": "DA1",
+                "kind": "groups",
+                "props": {"name": "DOMAIN ADMINS@corp.local"},
+            },
+            {
+                "id": "DA2",
+                "kind": "groups",
+                "props": {"name": "DOMAIN ADMINS@child.corp.local"},
+            },
+        ]
+        graph = build_graph(nodes, [])
+        self.assertEqual(target_candidates(graph, None), ["DA1", "DA2"])
+        self.assertIsNone(resolve_target(graph, None))
+        self.assertEqual(resolve_target(graph, None, source="U1"), "DA2")
+        self.assertIsNone(resolve_target(graph, "DOMAIN ADMINS"))
+
+    def test_source_resolution_never_chooses_partial_ambiguity(self):
+        graph = build_graph(
+            [
+                {"id": "U1", "kind": "users", "props": {"name": "alice@corp.local"}},
+                {"id": "U2", "kind": "users", "props": {"name": "alice@dev.local"}},
+            ],
+            [],
+        )
+        self.assertEqual(_resolve_source(graph, "alice"), (None, False))
+        self.assertEqual(
+            _resolve_source(graph, "alice@corp.local"), ("U1", True)
+        )
+
+    def test_disabled_accounts_are_excluded_from_roasting(self):
+        nodes = [
+            {
+                "id": "U1",
+                "kind": "users",
+                "props": {
+                    "name": "disabled@corp.local",
+                    "enabled": False,
+                    "dontreqpreauth": True,
+                    "hasspn": True,
+                },
+            }
+        ]
+        quickwins = collect_all(build_graph(nodes, []))
+        self.assertNotIn("AS-REP roast", quickwins)
+        self.assertNotIn("Kerberoast", quickwins)
+
+    def test_protected_users_and_sensitive_flag_are_separate_findings(self):
+        nodes = [
+            {
+                "id": "U1",
+                "kind": "users",
+                "props": {
+                    "name": "admin1@corp.local",
+                    "admincount": True,
+                    "enabled": True,
+                    "sensitive": False,
+                },
+            },
+            {
+                "id": "PU",
+                "kind": "groups",
+                "props": {"name": "PROTECTED USERS@corp.local"},
+            },
+        ]
+        graph = build_graph(
+            nodes,
+            [{"src": "U1", "dst": "PU", "type": "MemberOf"}],
+        )
+        quickwins = collect_all(graph)
+        self.assertIn("Privileged account allows delegation", quickwins)
+        self.assertNotIn("Privileged account not in Protected Users", quickwins)
+
+    def test_laps_deployment_alone_is_not_a_confirmed_pivot(self):
+        nodes = [
+            {"id": "U1", "kind": "users", "props": {"name": "owned@corp.local"}},
+            {
+                "id": "C1",
+                "kind": "computers",
+                "props": {"name": "ws01.corp.local", "haslaps": True},
+            },
+            {
+                "id": "DA",
+                "kind": "groups",
+                "props": {"name": "DOMAIN ADMINS@corp.local"},
+            },
+        ]
+        graph = build_graph(
+            nodes,
+            [{"src": "C1", "dst": "DA", "type": "GenericAll"}],
+        )
+        pruned = prune_to_target(graph, "DA")
+        self.assertEqual(
+            find_pivot_candidates(
+                graph, "DA", pruned, excluded_sources={"U1"}
+            ),
+            [],
+        )
+
+        graph = build_graph(
+            nodes,
+            [
+                {"src": "U1", "dst": "C1", "type": "ReadLAPSPassword"},
+                {"src": "C1", "dst": "DA", "type": "GenericAll"},
+            ],
+        )
+        pruned = prune_to_target(graph, "DA")
+        pivots = find_pivot_candidates(
+            graph, "DA", pruned, excluded_sources={"U1"}
+        )
+        self.assertEqual(pivots[0]["node"], "C1")
+        self.assertEqual(pivots[0]["confidence"], "high")
+
+    def test_cli_compatibility_mode_exports_json(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            zpath = write_bh_zip(tmp_path / "compat.zip", base_files())
+            json_path = tmp_path / "compat.json"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "pathdog.py",
+                    "-z",
+                    str(zpath),
+                    "--compat",
+                    "--export-json",
+                    str(json_path),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
+            self.assertIn("BloodHound compatibility", proc.stdout)
+            report = json.loads(json_path.read_text())
+            self.assertTrue(report["compatible"])
+
     def test_pathfinding_is_fail_closed_for_context_and_unknown_edges(self):
         nodes = [
             {"id": "U1", "kind": "users", "props": {"name": "alice@corp.local"}},
@@ -118,10 +396,10 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("U1", pruned)
         self.assertIn("D1", pruned)
 
-    def test_modern_traversable_but_unsupported_edge_is_blocked_and_warned(self):
+    def test_modern_traversable_edge_is_supported(self):
         nodes = [
             {"id": "U1", "kind": "users", "props": {"name": "alice@corp.local"}},
-            {"id": "C1", "kind": "computers", "props": {"name": "gmsa.corp.local"}},
+            {"id": "C1", "kind": "users", "props": {"name": "gmsa$@corp.local"}},
         ]
         stderr = StringIO()
         with redirect_stderr(stderr):
@@ -129,8 +407,12 @@ class CoreTests(unittest.TestCase):
                 nodes,
                 [{"src": "U1", "dst": "C1", "type": "ReadGMSAPassword"}],
             )
-        self.assertIn("not yet implemented", stderr.getvalue())
-        self.assertEqual(find_paths(G, "U1", "C1"), [])
+        self.assertNotIn("not yet implemented", stderr.getvalue())
+        paths = find_paths(G, "U1", "C1")
+        self.assertEqual(paths[0].edges[0]["relation"], "ReadGMSAPassword")
+
+    def test_every_current_traversable_edge_has_an_explicit_model(self):
+        self.assertEqual(TRAVERSABLE_EDGES - set(EDGE_WEIGHTS), set())
 
     def test_dcsync_expands_split_group_rights_without_edge_explosion(self):
         nodes = [
@@ -303,7 +585,7 @@ class CoreTests(unittest.TestCase):
 
             self.assertIn("ADCS ADCSESC1", quickwins)
             self.assertTrue(any(f.category == "ADCS ADCSESC1" for f in findings))
-            self.assertTrue(any("certipy-ad req" in " ".join(f.commands) for f in findings))
+            self.assertTrue(any("certipy req" in " ".join(f.commands) for f in findings))
             self.assertEqual(
                 sum(1 for f in findings if f.category == "ADCS ADCSESC1"),
                 1,
@@ -545,7 +827,18 @@ class CoreTests(unittest.TestCase):
         self.assertIn("AllExtendedRights", findings[0].evidence)
 
     def test_every_weighted_relation_has_command_guidance(self):
-        structural = {"MemberOf", "Contains"}
+        structural = {
+            "ClaimSpecialIdentity",
+            "Contains",
+            "ContainsIdentity",
+            "GPOAppliesTo",
+            "HasSIDHistory",
+            "MemberOf",
+            "PropagatesACEsTo",
+            "SameForestTrust",
+            "SyncedToADUser",
+            "SyncedToEntraUser",
+        }
         for rel in EDGE_WEIGHTS:
             with self.subTest(rel=rel):
                 cmd, _ = get_commands(
@@ -560,7 +853,68 @@ class CoreTests(unittest.TestCase):
                 )
                 self.assertTrue(cmd.description)
                 if rel not in structural:
-                    self.assertTrue(cmd.commands, rel)
+                    self.assertTrue(cmd.commands or cmd.preconditions, rel)
+
+    def test_generic_control_guidance_depends_on_target_kind(self):
+        generic_all_gpo, _ = get_commands(
+            "GenericAll",
+            "U1",
+            "GPO1",
+            "alice@corp.local",
+            "Workstations Policy@corp.local",
+            "users",
+            "gpos",
+            "alice@corp.local",
+        )
+        generic_all_group, _ = get_commands(
+            "GenericAll",
+            "U1",
+            "G1",
+            "alice@corp.local",
+            "HELPDESK@corp.local",
+            "users",
+            "groups",
+            "alice@corp.local",
+        )
+        generic_write_template, _ = get_commands(
+            "GenericWrite",
+            "U1",
+            "T1",
+            "alice@corp.local",
+            "UserTemplate@corp.local",
+            "users",
+            "certtemplates",
+            "alice@corp.local",
+        )
+        self.assertIn("pygpoabuse", " ".join(generic_all_gpo.commands))
+        self.assertNotIn("groupMember", " ".join(generic_all_gpo.commands))
+        self.assertIn("groupMember", " ".join(generic_all_group.commands))
+        self.assertIn("certipy template", " ".join(generic_write_template.commands))
+
+    def test_command_values_are_quoted_or_neutralized(self):
+        self.assertEqual(quote_posix("Jean O'Brien"), "'Jean O'\"'\"'Brien'")
+        self.assertEqual(quote_powershell("Jean O'Brien"), "'Jean O''Brien'")
+        command_set, _ = get_commands(
+            "WriteSPN",
+            "U1",
+            "U2",
+            "attacker;touch /tmp/pwned@corp.local",
+            "Jean O'Brien@corp.local",
+            "users",
+            "users",
+            "attacker;touch /tmp/pwned@corp.local",
+        )
+        rendered = "\n".join(command_set.commands)
+        self.assertNotIn("touch /tmp/pwned", rendered)
+        self.assertNotIn("O'Brien", rendered)
+        self.assertIn("<SRC_ACCOUNT>", rendered)
+        self.assertIn("<TARGET_OBJECT>", rendered)
+
+    def test_templates_do_not_embed_example_passwords(self):
+        source = Path("pathdog/commands.py").read_text(encoding="utf-8")
+        self.assertNotIn("NewP@ssw0rd", source)
+        self.assertNotIn("Pwn3dP@ss", source)
+        self.assertNotIn("certipy-ad", source)
 
     def test_has_session_commands_target_source_host(self):
         cmd, next_actor = get_commands(
@@ -591,7 +945,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("@DC01.corp.local", cmd.commands[0])
 
     def test_computer_takeover_edges_switch_to_machine_identity(self):
-        for rel in ("GenericWrite", "GenericAll", "AllExtendedRights"):
+        for rel in ("GenericWrite", "GenericAll"):
             with self.subTest(rel=rel):
                 _, next_actor = get_commands(
                     rel,

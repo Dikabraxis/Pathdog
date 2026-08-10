@@ -53,11 +53,30 @@ EDGE_WEIGHTS = {
     "WriteOwnerLimitedRights": 3,
     "DCFor": 1,
     "SameForestTrust": 3,
-    "CrossForestTrust": 3,
+    "CrossForestTrust": 5,
     "CoerceAndRelayNTLMToSMB": 3,
     "CoerceAndRelayNTLMToADCS": 3,
     "CoerceAndRelayNTLMToLDAP": 3,
     "CoerceAndRelayNTLMToLDAPS": 3,
+    # BloodHound 9.x identity, trust and managed-service-account edges
+    "AbuseTGTDelegation": 4,
+    "AddAllowedToAct": 4,
+    "ClaimSpecialIdentity": 1,
+    "CoerceToTGT": 4,
+    "DumpSMSAPassword": 2,
+    "HasSIDHistory": 1,
+    "HasTrustKeys": 3,
+    "ReadGMSAPassword": 2,
+    "SpoofSIDHistory": 4,
+    "SyncedToADUser": 1,
+    "SyncedToEntraUser": 1,
+    "WriteAltSecurityIdentities": 3,
+    "WritePublicInformation": 3,
+    # BloodHound-computed structural/GPO application edges
+    "ContainsIdentity": 1,
+    "PropagatesACEsTo": 1,
+    "GPOAppliesTo": 1,
+    "CanApplyGPO": 2,
 }
 
 DEFAULT_WEIGHT = 5

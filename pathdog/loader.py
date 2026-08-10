@@ -7,7 +7,12 @@ Supports:
 """
 
 import json
+import re
+import sys
 import zipfile
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from io import TextIOWrapper
 from pathlib import Path
 
 CORE_EXPECTED_PREFIXES = ("users", "computers", "groups", "domains", "gpos", "ous")
@@ -25,7 +30,59 @@ EXPECTED_PREFIXES = (
     "rootcas",
     "aiacas",
     "ntauthstores",
+    "issuancepolicies",
 )
+
+
+@dataclass(frozen=True)
+class ZipSafetyLimits:
+    """Bounds that reject implausible archives before JSON is allocated."""
+
+    max_files: int = 2_048
+    max_file_size: int = 512 * 1024 * 1024
+    max_total_size: int = 4 * 1024 * 1024 * 1024
+    max_compression_ratio: float = 1_000.0
+
+
+DEFAULT_ZIP_LIMITS = ZipSafetyLimits()
+
+
+@dataclass
+class CollectionMetadata:
+    path: str
+    archive_size: int = 0
+    uncompressed_size: int = 0
+    json_files: int = 0
+    file_types: set[str] = field(default_factory=set)
+    collector_versions: set[str] = field(default_factory=set)
+    collection_times: list[datetime] = field(default_factory=list)
+
+    @property
+    def earliest(self) -> datetime | None:
+        return min(self.collection_times) if self.collection_times else None
+
+    @property
+    def latest(self) -> datetime | None:
+        return max(self.collection_times) if self.collection_times else None
+
+    def to_dict(self) -> dict:
+        return {
+            "path": self.path,
+            "archive_size": self.archive_size,
+            "uncompressed_size": self.uncompressed_size,
+            "json_files": self.json_files,
+            "file_types": sorted(self.file_types),
+            "collector_versions": sorted(self.collector_versions),
+            "earliest": self.earliest.isoformat() if self.earliest else None,
+            "latest": self.latest.isoformat() if self.latest else None,
+        }
+
+
+@dataclass
+class LoadResult:
+    nodes: list[dict]
+    edges: list[dict]
+    metadata: CollectionMetadata
 
 
 def _json_files(zf: zipfile.ZipFile) -> list[str]:
@@ -61,13 +118,28 @@ def load_zip(path: str) -> tuple[list[dict], list[dict]]:
     nodes: list of {"id": str, "kind": str, "props": dict}
     edges: list of {"src": str, "dst": str, "type": str}
     """
+    result = load_zip_detailed(path)
+    return result.nodes, result.edges
+
+
+def load_zip_detailed(
+    path: str,
+    *,
+    limits: ZipSafetyLimits = DEFAULT_ZIP_LIMITS,
+) -> LoadResult:
+    """Load a ZIP and return graph data plus collection metadata."""
     if not zipfile.is_zipfile(path):
         raise ValueError(f"Not a valid ZIP file: {path}")
 
     nodes: list[dict] = []
     edges: list[dict] = []
+    metadata = CollectionMetadata(
+        path=str(path),
+        archive_size=Path(path).stat().st_size,
+    )
 
     with zipfile.ZipFile(path, "r") as zf:
+        _validate_archive(zf, path, limits)
         json_files = _json_files(zf)
         if not json_files:
             raise ValueError(
@@ -75,21 +147,28 @@ def load_zip(path: str) -> tuple[list[dict], list[dict]]:
                 "Expected files matching: users*.json, computers*.json, etc."
             )
 
+        metadata.json_files = len(json_files)
+        metadata.uncompressed_size = sum(
+            zf.getinfo(name).file_size for name in json_files
+        )
         found_kinds: set[str] = set()
 
         for fname in json_files:
             try:
-                data = json.loads(zf.read(fname))
-            except json.JSONDecodeError as exc:
+                with zf.open(fname) as raw:
+                    data = json.load(TextIOWrapper(raw, encoding="utf-8-sig"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                 raise ValueError(f"Malformed JSON in {fname}: {exc}") from exc
 
             meta_type = ""
             if isinstance(data, dict):
                 meta_type = data.get("meta", {}).get("type", "")
+                _collect_metadata(metadata, fname, data.get("meta", {}))
 
             kind = _classify(fname, meta_type) or "unknown"
             if kind != "unknown":
                 found_kinds.add(kind)
+                metadata.file_types.add(kind)
 
             objects = _extract_objects(data)
             rels = _extract_relationships(data, objects)
@@ -102,6 +181,8 @@ def load_zip(path: str) -> tuple[list[dict], list[dict]]:
                         "kind": kind,
                         "props": obj.get("Properties", {}),
                     })
+                if kind == "domains":
+                    nodes.extend(_trust_target_nodes(obj))
 
             for rel in rels:
                 src = rel.get("StartNode") or rel.get("SourceNode")
@@ -112,14 +193,103 @@ def load_zip(path: str) -> tuple[list[dict], list[dict]]:
 
         missing = [p for p in CORE_EXPECTED_PREFIXES if p not in found_kinds]
         if missing:
-            import sys
             print(
                 f"[warn] ZIP missing expected file types: {', '.join(missing)}. "
                 "Some attack paths may be incomplete.",
                 file=sys.stderr,
             )
 
-    return nodes, edges
+    return LoadResult(nodes=nodes, edges=edges, metadata=metadata)
+
+
+def _validate_archive(
+    zf: zipfile.ZipFile,
+    path: str,
+    limits: ZipSafetyLimits,
+) -> None:
+    infos = [info for info in zf.infolist() if not info.is_dir()]
+    if len(infos) > limits.max_files:
+        raise ValueError(
+            f"ZIP contains {len(infos)} files; safety limit is {limits.max_files}: {path}"
+        )
+
+    total = sum(info.file_size for info in infos)
+    if total > limits.max_total_size:
+        raise ValueError(
+            f"ZIP expands to {total} bytes; safety limit is "
+            f"{limits.max_total_size}: {path}"
+        )
+
+    for info in infos:
+        if info.file_size > limits.max_file_size:
+            raise ValueError(
+                f"ZIP member {info.filename!r} expands to {info.file_size} bytes; "
+                f"per-file safety limit is {limits.max_file_size}"
+            )
+        ratio = info.file_size / max(info.compress_size, 1)
+        if ratio > limits.max_compression_ratio:
+            raise ValueError(
+                f"ZIP member {info.filename!r} has suspicious compression ratio "
+                f"{ratio:.0f}:1; safety limit is {limits.max_compression_ratio:.0f}:1"
+            )
+
+
+_FILENAME_TIMESTAMP = re.compile(r"(?:^|_)(\d{14})(?:_|$)")
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    if isinstance(value, (int, float)):
+        try:
+            timestamp = value / 1_000 if value > 10_000_000_000 else value
+            return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+        return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc)
+    except ValueError:
+        return None
+
+
+def _collect_metadata(
+    metadata: CollectionMetadata,
+    filename: str,
+    raw_meta: object,
+) -> None:
+    meta = raw_meta if isinstance(raw_meta, dict) else {}
+    lowered = {str(key).lower(): value for key, value in meta.items()}
+    for key in (
+        "version",
+        "collectorversion",
+        "sharphoundversion",
+        "collectionversion",
+    ):
+        value = lowered.get(key)
+        if value:
+            metadata.collector_versions.add(str(value))
+    for key in (
+        "starttime",
+        "endtime",
+        "collectiontime",
+        "timestamp",
+        "collectedat",
+    ):
+        parsed = _parse_timestamp(lowered.get(key))
+        if parsed:
+            metadata.collection_times.append(parsed)
+
+    match = _FILENAME_TIMESTAMP.search(Path(filename).stem)
+    if match:
+        try:
+            parsed = datetime.strptime(
+                match.group(1), "%Y%m%d%H%M%S"
+            ).replace(tzinfo=timezone.utc)
+            metadata.collection_times.append(parsed)
+        except ValueError:
+            pass
 
 
 def _extract_objects(data: dict | list) -> list[dict]:
@@ -135,22 +305,42 @@ def _extract_objects(data: dict | list) -> list[dict]:
 def _extract_relationships(data: dict | list, objects: list[dict]) -> list[dict]:
     """Extract all relationship edges from a JSON blob.
 
-    Tries (in order):
-    1. Top-level explicit array (legacy rels/edges or CE Relationships)
-    2. Legacy ACE-embedded edges
-    3. CE embedded arrays (Members, LocalAdmins, Sessions, etc.)
+    Explicit and embedded sources are additive. Duplicate relationships are
+    removed after collection so a schema variant cannot hide valid edges.
     """
     if isinstance(data, list):
         # Bare list of objects — only CE embedded extraction possible
-        return _extract_legacy_aces(objects) + _extract_ce_arrays(objects)
+        return _deduplicate_relationships(
+            _extract_legacy_aces(objects) + _extract_ce_arrays(objects)
+        )
 
-    # Explicit top-level array
+    rels: list[dict] = []
     for key in ("rels", "edges", "Rels", "Edges", "relationships", "Relationships"):
         if key in data and isinstance(data[key], list):
-            return data[key]
+            rels.extend(data[key])
 
-    # Embedded extraction (both legacy and CE)
-    return _extract_legacy_aces(objects) + _extract_ce_arrays(objects)
+    rels.extend(_extract_legacy_aces(objects))
+    rels.extend(_extract_ce_arrays(objects))
+    return _deduplicate_relationships(rels)
+
+
+def _deduplicate_relationships(rels: list[dict]) -> list[dict]:
+    unique: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for rel in rels:
+        if not isinstance(rel, dict):
+            continue
+        src = rel.get("StartNode") or rel.get("SourceNode")
+        dst = rel.get("EndNode") or rel.get("TargetNode")
+        rtype = rel.get("RelationshipType") or rel.get("Type")
+        if not (src and dst and rtype):
+            continue
+        key = (str(src), str(dst), str(rtype))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(rel)
+    return unique
 
 
 def _extract_legacy_aces(objects: list[dict]) -> list[dict]:
@@ -167,6 +357,27 @@ def _extract_legacy_aces(objects: list[dict]) -> list[dict]:
                 # dst principal has rtype right ON src object
                 rels.append({"StartNode": str(dst), "EndNode": str(src), "RelationshipType": str(rtype)})
     return rels
+
+
+def _trust_target_nodes(obj: dict) -> list[dict]:
+    """Create the domain stubs BloodHound creates while ingesting trusts."""
+    nodes: list[dict] = []
+    for trust in obj.get("Trusts", []):
+        if not isinstance(trust, dict):
+            continue
+        target_sid = trust.get("TargetDomainSid")
+        if not target_sid:
+            continue
+        target_name = trust.get("TargetDomainName") or target_sid
+        nodes.append({
+            "id": str(target_sid),
+            "kind": "domains",
+            "props": {
+                "name": str(target_name),
+                "domainsid": str(target_sid),
+            },
+        })
+    return nodes
 
 
 # CE relationship arrays on computer objects
@@ -194,8 +405,8 @@ def _extract_ce_arrays(objects: list[dict]) -> list[dict]:
                 rels.append({"StartNode": str(mid), "EndNode": obj_id, "RelationshipType": "MemberOf"})
 
         # Computers — privilege arrays: principal -[rel]→ computer
-        for field, rel_type in _COMPUTER_ARRAYS.items():
-            container = obj.get(field, {})
+        for array_name, rel_type in _COMPUTER_ARRAYS.items():
+            container = obj.get(array_name, {})
             results = (
                 container.get("Results", []) if isinstance(container, dict)
                 else container if isinstance(container, list)
@@ -232,10 +443,12 @@ def _extract_ce_arrays(objects: list[dict]) -> list[dict]:
             if eid:
                 rels.append({"StartNode": str(eid), "EndNode": obj_id, "RelationshipType": "AllowedToAct"})
 
-        # Domain trusts
-        # TrustDirection is int in legacy v4 (0/1/2/3) but BloodHound CE may
-        # emit a string code ("Inbound"/"Outbound"/"Bidirectional"/"Disabled").
+        # Domain trusts. This mirrors BloodHound's ParseDomainTrusts logic:
+        # raw CrossForestTrust is context-only; only SameForestTrust and the
+        # derived cross-forest abuse edges can enter the attack graph.
         for trust in obj.get("Trusts", []):
+            if not isinstance(trust, dict):
+                continue
             target_sid = trust.get("TargetDomainSid")
             if not target_sid:
                 continue
@@ -244,11 +457,41 @@ def _extract_ce_arrays(objects: list[dict]) -> list[dict]:
                 direction = {"inbound": 1, "outbound": 2, "bidirectional": 3}.get(raw.lower(), 0)
             else:
                 direction = raw
-            # 1=Inbound (target trusts us), 2=Outbound (we trust target), 3=Bidirectional
+
+            trust_type = str(trust.get("TrustType", ""))
+            relation = (
+                "SameForestTrust"
+                if trust_type in {"ParentChild", "TreeRoot", "CrossLink"}
+                else "CrossForestTrust"
+            )
+            tgt_delegation = _boolean(trust.get("TGTDelegationEnabled"))
+            sid_filtering = _boolean(trust.get("SidFilteringEnabled"))
+
+            # 1=Inbound: target -> current; 2=Outbound: current -> target.
             if direction in (1, 3):
-                rels.append({"StartNode": obj_id, "EndNode": str(target_sid), "RelationshipType": "TrustedBy"})
+                rels.append({
+                    "StartNode": str(target_sid),
+                    "EndNode": obj_id,
+                    "RelationshipType": relation,
+                })
+                if relation == "CrossForestTrust" and tgt_delegation:
+                    rels.append({
+                        "StartNode": str(target_sid),
+                        "EndNode": obj_id,
+                        "RelationshipType": "AbuseTGTDelegation",
+                    })
             if direction in (2, 3):
-                rels.append({"StartNode": str(target_sid), "EndNode": obj_id, "RelationshipType": "TrustedBy"})
+                rels.append({
+                    "StartNode": obj_id,
+                    "EndNode": str(target_sid),
+                    "RelationshipType": relation,
+                })
+                if relation == "CrossForestTrust" and not sid_filtering:
+                    rels.append({
+                        "StartNode": str(target_sid),
+                        "EndNode": obj_id,
+                        "RelationshipType": "SpoofSIDHistory",
+                    })
 
         # GPO Links: gpo -[GPLink]→ ou/domain
         for link in obj.get("Links", []):
@@ -277,3 +520,9 @@ def _node_id(obj: dict) -> str | None:
         if val and isinstance(val, str):
             return val
     return None
+
+
+def _boolean(value: object) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes"}
+    return bool(value)
