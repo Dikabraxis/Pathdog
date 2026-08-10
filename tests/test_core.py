@@ -22,6 +22,7 @@ from pathdog.graph import (
 from pathdog.loader import ZipSafetyLimits, load_zip, load_zip_detailed
 from pathdog.pathfinder import actionable_view, find_paths, find_pivot_candidates
 from pathdog.quickwins import collect_all
+from pathdog.report._helpers import _edge_commands
 from pathdog.schema import TRAVERSABLE_EDGES
 from pathdog.triage import collect_findings
 from pathdog.weights import EDGE_WEIGHTS
@@ -70,6 +71,55 @@ def base_files(extra_rels=None, extra_files=None):
 
 
 class CoreTests(unittest.TestCase):
+    def test_adcs_postprocessing_derives_esc1_and_pki_topology(self):
+        nodes = [
+            {"id": "U1", "kind": "users", "props": {"name": "alice@corp.local"}},
+            {"id": "D1", "kind": "domains", "props": {"name": "corp.local", "domainsid": "S-1-5-21-1"}},
+            {"id": "C1", "kind": "computers", "props": {"name": "CA01.corp.local", "domainsid": "S-1-5-21-1"}},
+            {"id": "CA1", "kind": "enterprisecas", "props": {"name": "CORP-CA@corp.local", "domainsid": "S-1-5-21-1", "certthumbprint": "AABB", "certchain": ["AABB"]}},
+            {"id": "ROOT1", "kind": "rootcas", "props": {"name": "CORP-ROOT@corp.local", "domainsid": "S-1-5-21-1", "certthumbprint": "AABB"}},
+            {"id": "STORE1", "kind": "ntauthstores", "props": {"name": "NTAUTH@corp.local", "domainsid": "S-1-5-21-1", "certthumbprints": ["AABB"]}},
+            {"id": "T1", "kind": "certtemplates", "props": {"name": "ESC1@corp.local", "domainsid": "S-1-5-21-1", "requiresmanagerapproval": False, "authenticationenabled": True, "enrolleesuppliessubject": True, "schemaversion": 2, "authorizedsignatures": 0, "effectiveekus": ["1.3.6.1.5.5.7.3.2"]}},
+        ]
+        edges = [
+            {"src": "ROOT1", "dst": "D1", "type": "RootCAFor"},
+            {"src": "STORE1", "dst": "D1", "type": "NTAuthStoreFor"},
+            {"src": "T1", "dst": "CA1", "type": "PublishedTo"},
+            {"src": "U1", "dst": "T1", "type": "Enroll"},
+            {"src": "U1", "dst": "CA1", "type": "Enroll"},
+            {"src": "C1", "dst": "CA1", "type": "HostsCAService"},
+        ]
+        raw = build_raw_graph(nodes, edges)
+        self.assertFalse(raw.has_edge("U1", "D1"))
+        graph = build_graph(nodes, edges)
+        self.assertIn("EnterpriseCAFor", graph["CA1"]["ROOT1"]["relations"])
+        self.assertIn("TrustedForNTAuth", graph["CA1"]["STORE1"]["relations"])
+        self.assertIn("ADCSESC1", graph["U1"]["D1"]["relations"])
+        self.assertIn("GoldenCert", graph["C1"]["D1"]["relations"])
+        command_set, _ = _edge_commands(
+            graph,
+            {"src": "U1", "dst": "D1", "relation": "ADCSESC1"},
+            "alice@corp.local",
+        )
+        command = "\n".join(command_set.commands)
+        self.assertIn("-ca 'CORP-CA'", command)
+        self.assertIn("-template 'ESC1'", command)
+        self.assertNotIn("-template 'corp.local'", command)
+
+    def test_adcs_postprocessing_fails_closed_on_incomplete_template(self):
+        nodes = [
+            {"id": "U1", "kind": "users", "props": {"name": "alice@corp.local"}},
+            {"id": "D1", "kind": "domains", "props": {"name": "corp.local"}},
+            {"id": "T1", "kind": "certtemplates", "props": {"name": "unknown@corp.local", "enrolleesuppliessubject": True}},
+            {"id": "CA1", "kind": "enterprisecas", "props": {"name": "CA@corp.local"}},
+        ]
+        graph = build_graph(nodes, [
+            {"src": "T1", "dst": "CA1", "type": "PublishedTo"},
+            {"src": "U1", "dst": "T1", "type": "Enroll"},
+            {"src": "U1", "dst": "CA1", "type": "Enroll"},
+        ])
+        self.assertFalse(graph.has_edge("U1", "D1"))
+
     def test_loader_adds_explicit_and_embedded_relationship_sources(self):
         with TemporaryDirectory() as tmp:
             zpath = Path(tmp) / "combined.zip"
@@ -179,6 +229,17 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(
                 attack["D3"]["D1"]["relation"], "SpoofSIDHistory"
             )
+
+    def test_has_trust_keys_is_synthesized_only_for_matching_trust_account(self):
+        nodes = [
+            {"id": "D1", "kind": "domains", "props": {"name": "corp.local", "domainsid": "SID1", "netbios": "CORP"}},
+            {"id": "D2", "kind": "domains", "props": {"name": "child.local", "domainsid": "SID2", "netbios": "CHILD"}},
+            {"id": "U1", "kind": "users", "props": {"name": "CORP$@child.local", "domainsid": "SID2", "samaccountname": "CORP$"}},
+            {"id": "U2", "kind": "users", "props": {"name": "OTHER$@child.local", "domainsid": "SID2", "samaccountname": "OTHER$"}},
+        ]
+        graph = build_graph(nodes, [{"src": "D1", "dst": "D2", "type": "SameForestTrust"}])
+        self.assertIn("HasTrustKeys", graph["D1"]["U1"]["relations"])
+        self.assertFalse(graph.has_edge("D1", "U2"))
 
     def test_compatibility_reports_unknown_edges(self):
         nodes = [
@@ -915,6 +976,7 @@ class CoreTests(unittest.TestCase):
         self.assertNotIn("NewP@ssw0rd", source)
         self.assertNotIn("Pwn3dP@ss", source)
         self.assertNotIn("certipy-ad", source)
+        self.assertNotIn("-list-requests", source)
 
     def test_has_session_commands_target_source_host(self):
         cmd, next_actor = get_commands(

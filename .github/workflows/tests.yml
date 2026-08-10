@@ -48,3 +48,25 @@ jobs:
           pathdog --help
       - name: Audit runtime dependencies
         run: pip-audit --requirement requirements.txt
+
+  bloodhound-oracle:
+    name: BloodHound 9.5.1 fixture oracle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install Pathdog
+        run: python -m pip install .
+      - name: Download pinned official Version 6 ADCS fixture
+        run: |
+          curl --fail --location --retry 3 \
+            --output /tmp/bloodhound-version6-adcs.zip \
+            https://raw.githubusercontent.com/SpecterOps/BloodHound/ecccc9fdb19df5af8a589d407dc5f3b5a4e57202/cmd/api/src/services/graphify/fixtures/Version6ADCSZIP/raw/archive.zip
+          echo "8b37f581bf364410253e78f20d8e031f6399f4bdde5a6057130189b24ac24df1  /tmp/bloodhound-version6-adcs.zip" | sha256sum --check
+      - name: Compare Pathdog with the official ingestion/analysis oracle
+        env:
+          BLOODHOUND_ADCS_FIXTURE: /tmp/bloodhound-version6-adcs.zip
+        run: python -m unittest tests.test_official_fixture -v

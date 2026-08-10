@@ -2,6 +2,40 @@
 
 All notable changes to Pathdog are documented here.
 
+## 1.2.0 - 2026-08-10
+
+### Added
+
+- Current SharpHound Version 6 extraction for sessions, local groups, user
+  rights, SPN targets, primary groups, containment and AD CS relationships.
+- BloodHound-compatible `OwnsRaw` / `WriteOwnerRaw` processing with
+  `BlockOwnerImplicitRights` handling.
+- AD CS topology synthesis for `EnterpriseCAFor`, `IssuedSignedBy`,
+  `TrustedForNTAuth`, `ExtendedByPolicy` and `EnrollOnBehalfOf`.
+- Conservative raw-data synthesis for ESC1, ESC3, ESC4, ESC13 and
+  `GoldenCert`, including group-effective enrollment rights.
+- Calculated-edge evidence so reports can place the actual CA/template names
+  into Certipy commands.
+- `HasTrustKeys` synthesis from trust direction, domain NetBIOS name and the
+  collected trust account.
+- A checksum-pinned official BloodHound Version 6 ADCS oracle job in CI.
+
+### Changed
+
+- The Version 6 ADCS fixture now ingests the same 2,560 raw relationships as
+  BloodHound and reproduces its fixture's ESC1/topology outputs.
+- `CanApplyGPO` and `WritePublicInformation` now include executable,
+  prerequisite-aware guidance instead of description-only output.
+- Calculated ESC and GoldenCert commands no longer confuse the destination
+  domain with the vulnerable CA or certificate template.
+
+### Fixed
+
+- Current collector `Owns`/`WriteOwner` ACEs are retained as raw rights and
+  are no longer treated as already post-processed edges.
+- Bare sessions, `RemoteInteractiveLogonRight`, CA registry ACLs and several
+  embedded Version 6 relationship arrays are no longer dropped.
+
 ## 1.1.0 - 2026-08-10
 
 ### Added

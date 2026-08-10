@@ -31,6 +31,7 @@ EXPECTED_PREFIXES = (
     "aiacas",
     "ntauthstores",
     "issuancepolicies",
+    "sessions",
 )
 
 
@@ -176,10 +177,11 @@ def load_zip_detailed(
             for obj in objects:
                 node_id = _node_id(obj)
                 if node_id:
+                    props = _object_properties(obj, kind)
                     nodes.append({
                         "id": node_id,
                         "kind": kind,
-                        "props": obj.get("Properties", {}),
+                        "props": props,
                     })
                 if kind == "domains":
                     nodes.extend(_trust_target_nodes(obj))
@@ -353,10 +355,86 @@ def _extract_legacy_aces(objects: list[dict]) -> list[dict]:
         for ace in obj.get("Aces", []):
             dst = ace.get("PrincipalSID") or ace.get("PrincipalName")
             rtype = ace.get("RightName") or ace.get("Type")
-            if dst and rtype:
+            if dst and rtype and str(dst) != str(src):
                 # dst principal has rtype right ON src object
-                rels.append({"StartNode": str(dst), "EndNode": str(src), "RelationshipType": str(rtype)})
+                normalized = {
+                    "Owns": "OwnsRaw",
+                    "WriteOwner": "WriteOwnerRaw",
+                }.get(str(rtype), str(rtype))
+                rels.append({
+                    "StartNode": str(dst),
+                    "EndNode": str(src),
+                    "RelationshipType": normalized,
+                })
+
+        # Enterprise CA security is collected from the CA registry and is the
+        # authoritative source for ManageCA/ManageCertificates/Enroll rights.
+        ca_security = obj.get("CARegistryData", {}).get("CASecurity", {})
+        if isinstance(ca_security, dict) and ca_security.get("Collected"):
+            for ace in ca_security.get("Data", []):
+                if not isinstance(ace, dict):
+                    continue
+                dst = ace.get("PrincipalSID") or ace.get("PrincipalName")
+                rtype = ace.get("RightName") or ace.get("Type")
+                if dst and rtype and str(rtype) != "Owns":
+                    rels.append({
+                        "StartNode": str(dst),
+                        "EndNode": str(src),
+                        "RelationshipType": str(rtype),
+                    })
     return rels
+
+
+def _object_properties(obj: dict, kind: str) -> dict:
+    """Merge SharpHound top-level/nested collection fields into node props."""
+    props = dict(obj.get("Properties", {}))
+    aliases = {
+        "DomainSID": "domainsid",
+        "IsDC": "isdc",
+        "DoesAnyAceGrantOwnerRights": "doesanyacegrantownerrights",
+        "DoesAnyInheritedAceGrantOwnerRights": "doesanyinheritedacegrantownerrights",
+    }
+    for source, target in aliases.items():
+        if source in obj and obj[source] is not None:
+            props[target] = obj[source]
+
+    if kind == "enterprisecas":
+        registry = obj.get("CARegistryData", {})
+        restrictions = registry.get("EnrollmentAgentRestrictions") or {}
+        san = registry.get("IsUserSpecifiesSanEnabled") or {}
+        role_separation = registry.get("RoleSeparationEnabled") or {}
+        if isinstance(restrictions, dict):
+            props["enrollmentagentrestrictionscollected"] = _boolean(
+                restrictions.get("Collected")
+            )
+            if restrictions.get("Collected"):
+                props["hasenrollmentagentrestrictions"] = bool(
+                    restrictions.get("Restrictions")
+                )
+        if isinstance(san, dict):
+            props["isuserspecifiessanenabledcollected"] = _boolean(
+                san.get("Collected")
+            )
+            if san.get("Collected"):
+                props["isuserspecifiessanenabled"] = _boolean(san.get("Value"))
+        if isinstance(role_separation, dict):
+            props["roleseparationenabledcollected"] = _boolean(
+                role_separation.get("Collected")
+            )
+            if role_separation.get("Collected"):
+                props["roleseparationenabled"] = _boolean(
+                    role_separation.get("Value")
+                )
+
+    if kind == "computers":
+        registry = obj.get("DCRegistryData", {})
+        mapping = registry.get("CertificateMappingMethods") or {}
+        binding = registry.get("StrongCertificateBindingEnforcement") or {}
+        if isinstance(mapping, dict) and mapping.get("Collected"):
+            props["certificatemappingmethodsraw"] = mapping.get("Value")
+        if isinstance(binding, dict) and binding.get("Collected"):
+            props["strongcertificatebindingenforcementraw"] = binding.get("Value")
+    return props
 
 
 def _trust_target_nodes(obj: dict) -> list[dict]:
@@ -394,6 +472,16 @@ def _extract_ce_arrays(objects: list[dict]) -> list[dict]:
     rels: list[dict] = []
 
     for obj in objects:
+        # Dedicated sessions files contain bare session records without an
+        # object identifier.
+        if obj.get("ComputerSID") and obj.get("UserSID"):
+            rels.append({
+                "StartNode": str(obj["ComputerSID"]),
+                "EndNode": str(obj["UserSID"]),
+                "RelationshipType": "HasSession",
+            })
+            continue
+
         obj_id = _node_id(obj)
         if not obj_id:
             continue
@@ -403,6 +491,22 @@ def _extract_ce_arrays(objects: list[dict]) -> list[dict]:
             mid = member.get("ObjectIdentifier") if isinstance(member, dict) else member
             if mid:
                 rels.append({"StartNode": str(mid), "EndNode": obj_id, "RelationshipType": "MemberOf"})
+
+        primary_group = obj.get("PrimaryGroupSID")
+        if primary_group:
+            rels.append({
+                "StartNode": obj_id,
+                "EndNode": str(primary_group),
+                "RelationshipType": "MemberOf",
+            })
+
+        contained_by = obj.get("ContainedBy")
+        if isinstance(contained_by, dict) and contained_by.get("ObjectIdentifier"):
+            rels.append({
+                "StartNode": str(contained_by["ObjectIdentifier"]),
+                "EndNode": obj_id,
+                "RelationshipType": "Contains",
+            })
 
         # Computers — privilege arrays: principal -[rel]→ computer
         for array_name, rel_type in _COMPUTER_ARRAYS.items():
@@ -421,13 +525,22 @@ def _extract_ce_arrays(objects: list[dict]) -> list[dict]:
         # (BloodHound CE schema: Source=Computer, Destination=User. The edge
         # represents "an attacker on this computer can steal this user's
         # session" — direction follows the attack.)
-        sessions_raw = obj.get("Sessions", {})
-        sessions = sessions_raw.get("Results", []) if isinstance(sessions_raw, dict) else []
-        for session in sessions:
-            uid = session.get("UserSID")
-            cid = session.get("ComputerSID") or obj_id
-            if uid:
-                rels.append({"StartNode": str(cid), "EndNode": str(uid), "RelationshipType": "HasSession"})
+        for session_key in ("Sessions", "PrivilegedSessions", "RegistrySessions"):
+            sessions_raw = obj.get(session_key, {})
+            sessions = (
+                sessions_raw.get("Results", [])
+                if isinstance(sessions_raw, dict) and sessions_raw.get("Collected", True)
+                else []
+            )
+            for session in sessions:
+                uid = session.get("UserSID")
+                cid = session.get("ComputerSID") or obj_id
+                if uid:
+                    rels.append({
+                        "StartNode": str(cid),
+                        "EndNode": str(uid),
+                        "RelationshipType": "HasSession",
+                    })
 
         # AllowedToDelegate: obj -[AllowedToDelegate]→ target
         # Some BloodHound exports list raw SPN strings here ("cifs/host.domain")
@@ -442,6 +555,176 @@ def _extract_ce_arrays(objects: list[dict]) -> list[dict]:
             eid = entry.get("ObjectIdentifier") if isinstance(entry, dict) else entry
             if eid:
                 rels.append({"StartNode": str(eid), "EndNode": obj_id, "RelationshipType": "AllowedToAct"})
+
+        for array_name, relation in (
+            ("HasSIDHistory", "HasSIDHistory"),
+            ("DumpSMSAPassword", "DumpSMSAPassword"),
+        ):
+            for entry in obj.get(array_name, []):
+                eid = entry.get("ObjectIdentifier") if isinstance(entry, dict) else entry
+                if eid:
+                    rels.append({
+                        "StartNode": obj_id,
+                        "EndNode": str(eid),
+                        "RelationshipType": relation,
+                    })
+
+        props = _object_properties(obj, "")
+        domain_sid = props.get("domainsid")
+        unconstrained = _boolean(props.get("unconstraineddelegation"))
+        if _boolean(obj.get("IsDC")) and domain_sid:
+            rels.append({
+                "StartNode": obj_id,
+                "EndNode": str(domain_sid),
+                "RelationshipType": "DCFor",
+            })
+        elif unconstrained and domain_sid:
+            rels.append({
+                "StartNode": obj_id,
+                "EndNode": str(domain_sid),
+                "RelationshipType": "CoerceToTGT",
+            })
+
+        for spn_target in obj.get("SPNTargets", []):
+            if not isinstance(spn_target, dict):
+                continue
+            computer_sid = spn_target.get("ComputerSID")
+            service = spn_target.get("Service")
+            if computer_sid and service:
+                rels.append({
+                    "StartNode": obj_id,
+                    "EndNode": str(computer_sid),
+                    "RelationshipType": str(service),
+                })
+
+        # Local groups and user-right assignments collected on computers.
+        for local_group in obj.get("LocalGroups", []):
+            if not isinstance(local_group, dict):
+                continue
+            group_id = local_group.get("ObjectIdentifier")
+            if not group_id or not (
+                local_group.get("Results")
+                or local_group.get("LocalNames")
+                or local_group.get("Name") != "IGNOREME"
+            ):
+                continue
+            rels.append({
+                "StartNode": str(group_id),
+                "EndNode": obj_id,
+                "RelationshipType": "LocalToComputer",
+            })
+            for member in local_group.get("Results", []):
+                member_id = (
+                    member.get("ObjectIdentifier")
+                    if isinstance(member, dict)
+                    else member
+                )
+                if member_id:
+                    rels.append({
+                        "StartNode": str(member_id),
+                        "EndNode": str(group_id),
+                        "RelationshipType": "MemberOfLocalGroup",
+                    })
+        for assignment, relation in (
+            ("RemoteDesktopUsers", "RemoteInteractiveLogonRight"),
+            ("DcomUsers", "ExecuteDCOM"),
+            ("PSRemoteUsers", "CanPSRemote"),
+        ):
+            value = obj.get(assignment, {})
+            results = value.get("Results", []) if isinstance(value, dict) else []
+            for principal in results:
+                principal_id = principal.get("ObjectIdentifier")
+                if principal_id:
+                    rels.append({
+                        "StartNode": str(principal_id),
+                        "EndNode": obj_id,
+                        "RelationshipType": relation,
+                    })
+
+        for user_right in obj.get("UserRights", []):
+            if not isinstance(user_right, dict) or not user_right.get("Collected"):
+                continue
+            if user_right.get("Privilege") != "SeRemoteInteractiveLogonRight":
+                continue
+            for principal in user_right.get("Results", []):
+                principal_id = (
+                    principal.get("ObjectIdentifier")
+                    if isinstance(principal, dict)
+                    else principal
+                )
+                if principal_id:
+                    rels.append({
+                        "StartNode": str(principal_id),
+                        "EndNode": obj_id,
+                        "RelationshipType": "RemoteInteractiveLogonRight",
+                    })
+
+        # AD CS topology and enrollment restrictions.
+        for template in obj.get("EnabledCertTemplates", []):
+            template_id = (
+                template.get("ObjectIdentifier")
+                if isinstance(template, dict)
+                else template
+            )
+            if template_id:
+                rels.append({
+                    "StartNode": str(template_id),
+                    "EndNode": obj_id,
+                    "RelationshipType": "PublishedTo",
+                })
+        hosting_computer = obj.get("HostingComputer")
+        if hosting_computer:
+            rels.append({
+                "StartNode": str(hosting_computer),
+                "EndNode": obj_id,
+                "RelationshipType": "HostsCAService",
+            })
+        registry = obj.get("CARegistryData", {})
+        restrictions = registry.get("EnrollmentAgentRestrictions") or {}
+        if isinstance(restrictions, dict) and restrictions.get("Collected"):
+            enabled = [
+                item.get("ObjectIdentifier") if isinstance(item, dict) else item
+                for item in obj.get("EnabledCertTemplates", [])
+            ]
+            for restriction in restrictions.get("Restrictions", []):
+                if restriction.get("AccessType") != "AccessAllowedCallback":
+                    continue
+                agent = restriction.get("Agent") or {}
+                agent_id = agent.get("ObjectIdentifier")
+                template = restriction.get("Template") or {}
+                templates = enabled if restriction.get("AllTemplates") else [
+                    template.get("ObjectIdentifier")
+                ]
+                for template_id in templates:
+                    if agent_id and template_id:
+                        rels.append({
+                            "StartNode": str(agent_id),
+                            "EndNode": str(template_id),
+                            "RelationshipType": "DelegatedEnrollmentAgent",
+                        })
+
+        domain_sid_top = obj.get("DomainSID")
+        if domain_sid_top:
+            relation = None
+            properties = obj.get("Properties", {})
+            if "certthumbprints" in {str(k).lower() for k in properties}:
+                relation = "NTAuthStoreFor"
+            elif "certthumbprint" in {str(k).lower() for k in properties} and not obj.get("HostingComputer"):
+                relation = "RootCAFor"
+            if relation:
+                rels.append({
+                    "StartNode": obj_id,
+                    "EndNode": str(domain_sid_top),
+                    "RelationshipType": relation,
+                })
+
+        group_link = obj.get("GroupLink")
+        if isinstance(group_link, dict) and group_link.get("ObjectIdentifier"):
+            rels.append({
+                "StartNode": obj_id,
+                "EndNode": str(group_link["ObjectIdentifier"]),
+                "RelationshipType": "OIDGroupLink",
+            })
 
         # Domain trusts. This mirrors BloodHound's ParseDomainTrusts logic:
         # raw CrossForestTrust is context-only; only SameForestTrust and the

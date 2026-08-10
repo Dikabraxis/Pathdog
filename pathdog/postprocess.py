@@ -233,10 +233,141 @@ def synthesize_sync_laps_password(
     return created
 
 
+def _domain_for_node(G: nx.DiGraph, node_id: str) -> str | None:
+    hint = _object_domain_hint(G, node_id)
+    for domain, data in G.nodes(data=True):
+        if data.get("kind") != "domains":
+            continue
+        props = data.get("props", {})
+        candidates = {
+            str(domain).lower(),
+            str(_property(props, "domainsid") or "").lower(),
+            str(_property(props, "name", "domain") or data.get("name", "")).lower(),
+        }
+        if hint and hint in candidates:
+            return domain
+        if _belongs_to_domain(G, node_id, domain):
+            return domain
+    return None
+
+
+def _blocks_owner_implicit_rights(G: nx.DiGraph, target: str) -> bool:
+    domain = _domain_for_node(G, target)
+    if not domain:
+        return False
+    value = str(_property(G.nodes[domain].get("props", {}), "dsheuristics") or "")
+    return len(value) > 28 and value[28] == "1"
+
+
+def _is_tier_zero_admin(
+    G: nx.DiGraph,
+    memberships: nx.DiGraph,
+    principal: str,
+) -> bool:
+    candidates = {principal}
+    if principal in memberships:
+        candidates.update(nx.descendants(memberships, principal))
+    for candidate in candidates:
+        name = str(G.nodes[candidate].get("name", "")).split("@", 1)[0].lower()
+        sid = str(candidate).upper()
+        if name in {"domain admins", "enterprise admins"} or sid.endswith(("-512", "-519")):
+            return True
+    return False
+
+
+def synthesize_ownership(
+    G: nx.DiGraph,
+    memberships: nx.DiGraph | None = None,
+) -> dict[str, int]:
+    """Convert current OwnsRaw/WriteOwnerRaw relations into usable edges.
+
+    BloodHound suppresses implicit owner rights on computer-derived objects
+    when dSHeuristics[28] enables BlockOwnerImplicitRights. The conservative
+    checks below reproduce that decision for the object kinds represented by
+    SharpHound JSON while retaining the raw edges as context.
+    """
+    memberships = memberships or _membership_graph(G)
+    created = {"Owns": 0, "WriteOwner": 0}
+    raw_edges = [
+        (src, dst, set(_relations(data)))
+        for src, dst, data in list(G.edges(data=True))
+        if {"OwnsRaw", "WriteOwnerRaw"} & set(_relations(data))
+    ]
+    computer_derived = {"computers", "localgroups", "localusers"}
+    for source, target, relations in raw_edges:
+        blocked = (
+            _blocks_owner_implicit_rights(G, target)
+            and G.nodes[target].get("kind") in computer_derived
+        )
+        if "OwnsRaw" in relations and (
+            not blocked or _is_tier_zero_admin(G, memberships, source)
+        ):
+            existed = G.has_edge(source, target) and "Owns" in _relations(
+                G[source][target]
+            )
+            _add_relation(G, source, target, "Owns")
+            created["Owns"] += int(not existed)
+        if "WriteOwnerRaw" in relations and not blocked:
+            existed = G.has_edge(source, target) and "WriteOwner" in _relations(
+                G[source][target]
+            )
+            _add_relation(G, source, target, "WriteOwner")
+            created["WriteOwner"] += int(not existed)
+    return created
+
+
+def synthesize_has_trust_keys(G: nx.DiGraph) -> int:
+    """Create HasTrustKeys using BloodHound's domain/trust-account rule."""
+    created = 0
+    users: dict[tuple[str, str], str] = {}
+    for node, data in G.nodes(data=True):
+        if data.get("kind") != "users":
+            continue
+        props = data.get("props", {})
+        domain_sid = str(_property(props, "domainsid") or "").upper()
+        sam = str(_property(props, "samaccountname") or "").upper()
+        if domain_sid and sam:
+            users[(domain_sid, sam)] = node
+
+    for domain, data in list(G.nodes(data=True)):
+        if data.get("kind") != "domains":
+            continue
+        netbios = str(_property(data.get("props", {}), "netbios") or "").upper()
+        if not netbios:
+            continue
+        for _, trusting_domain in list(G.out_edges(domain)):
+            if not (
+                {"SameForestTrust", "CrossForestTrust"}
+                & set(_relations(G[domain][trusting_domain]))
+            ):
+                continue
+            trusting_sid = str(
+                _property(G.nodes[trusting_domain].get("props", {}), "domainsid") or ""
+            ).upper()
+            trust_account = users.get((trusting_sid, f"{netbios}$"))
+            if not trust_account:
+                continue
+            existed = G.has_edge(domain, trust_account) and "HasTrustKeys" in _relations(
+                G[domain][trust_account]
+            )
+            _add_relation(G, domain, trust_account, "HasTrustKeys")
+            created += int(not existed)
+    return created
+
+
 def postprocess_graph(G: nx.DiGraph) -> nx.DiGraph:
     """Apply Pathdog's supported BloodHound post-processing stages in place."""
     memberships = _membership_graph(G)
+    ownership = synthesize_ownership(G, memberships)
+    # Imported lazily to keep the generic graph helpers independent of the
+    # ADCS implementation and avoid an import cycle.
+    from .adcs_postprocess import synthesize_adcs
+
+    adcs = synthesize_adcs(G, memberships, _add_relation)
     G.graph["postprocessed_edges"] = {
+        **ownership,
+        **adcs,
+        "HasTrustKeys": synthesize_has_trust_keys(G),
         "DCSync": synthesize_dcsync(G, memberships),
         "SyncLAPSPassword": synthesize_sync_laps_password(G, memberships),
     }

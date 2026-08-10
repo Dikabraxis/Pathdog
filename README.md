@@ -154,8 +154,14 @@ results, path nodes/edges, weights, relations, and node-visibility data when
 
 ### ADCS / ESC coverage
 
-Pathdog consumes precomputed BloodHound ADCS attack-path edges and produces
-Certipy-oriented guidance for:
+Pathdog derives AD CS topology relationships from current raw SharpHound
+Version 6 CA/template data. It conservatively synthesizes ESC1, ESC3, ESC4,
+ESC13 and GoldenCert when all required properties and effective enrollment
+rights are present. The generated edge retains its CA/template evidence so
+reports can produce Certipy-oriented commands with the actual object names.
+
+Pathdog also consumes precomputed BloodHound attack-path edges and produces
+guidance for:
 
 - `ADCSESC1`, `ADCSESC3`, `ADCSESC4`
 - `ADCSESC6a`, `ADCSESC6b`
@@ -170,8 +176,11 @@ Certipy-oriented guidance for:
   `ManageCertificates`, `DelegatedEnrollmentAgent`,
   `WritePKINameFlag`, and `WritePKIEnrollmentFlag`
 
-Pathdog does not yet derive ESC attack-path edges from raw CA/template
-properties. Context-only relations such as `Enroll`,
+ESC6, ESC9 and ESC10 are currently consumed when already calculated by
+BloodHound; Pathdog does not synthesize those families unless the necessary
+forest/DC certificate-mapping inputs are represented. This is deliberate:
+missing inputs fail closed instead of producing an optimistic attack path.
+Context-only relations such as `Enroll`,
 `DelegatedEnrollmentAgent`, and `WritePKI*` are retained for reporting but
 never treated as standalone attack-path steps.
 
@@ -282,6 +291,9 @@ and can be forced in captured output with `FORCE_COLOR=1`.
 - Pathdog synthesizes `SyncLAPSPassword` from effective `GetChanges` +
   `GetChangesInFilteredSet` rights to LAPS-enabled computers in the
   corresponding domain.
+- Pathdog post-processes current raw owner rights, trust accounts and AD CS
+  topology/attack prerequisites. Calculated AD CS commands use preserved edge
+  evidence rather than guessing a CA or template from the destination node.
 - Relationship classification covers all 64 traversable AD edge names in
   BloodHound 9.5.1 and targets SharpHound 2.14.0.
 - `pathdog --compat` uses a vendored upstream `valid_edges.json` snapshot for
@@ -290,8 +302,9 @@ and can be forced in captured output with `FORCE_COLOR=1`.
 - Generated templates target Impacket 0.13.x, Certipy 5.x, BloodyAD and
   NetExec-style CLIs. Preconditions remain part of the output; guidance is
   not a guarantee that an abuse will succeed in a specific environment.
-- Tests use small synthetic BloodHound ZIPs and run with the Python standard
-  library test runner: `python3 -m unittest discover -s tests`.
+- Tests use small synthetic BloodHound ZIPs plus a checksum-pinned official
+  SpecterOps Version 6 ADCS fixture oracle in CI. Run the local suite with
+  `python3 -m unittest discover -s tests`.
 
 ## License
 

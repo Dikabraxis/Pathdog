@@ -117,6 +117,11 @@ def _dangerous_relation_sort_key(rel: str) -> tuple[int, str]:
 
 
 def _commands_for_edge(G, src: str, dst: str, rel: str) -> list[str]:
+    raw_evidence = G.graph.get("edge_evidence", {}).get((src, dst, rel), [])
+    evidence = dict(raw_evidence[0]) if raw_evidence else {}
+    for key, node_id in list(evidence.items()):
+        if node_id in G:
+            evidence[f"{key}_name"] = _display_name(G, node_id).split("@", 1)[0]
     cmd, _ = get_commands(
         rel_type=rel,
         src_id=src,
@@ -126,6 +131,7 @@ def _commands_for_edge(G, src: str, dst: str, rel: str) -> list[str]:
         src_kind=_kind(G, src),
         dst_kind=_kind(G, dst),
         actor=_display_name(G, src),
+        evidence=evidence,
     )
     return cmd.commands
 

@@ -46,6 +46,14 @@ def _edge_commands(
 ) -> tuple[CommandSet, str]:
     """Return (CommandSet, next_actor) for one edge, given the current actor."""
     src, dst = edge["src"], edge["dst"]
+    raw_evidence = G.graph.get("edge_evidence", {}).get(
+        (src, dst, edge["relation"]), []
+    )
+    evidence = dict(raw_evidence[0]) if raw_evidence else {}
+    for key, node_id in list(evidence.items()):
+        if node_id in G:
+            name = _display_name(G, node_id)
+            evidence[f"{key}_name"] = name.split("@", 1)[0]
     return get_commands(
         rel_type=edge["relation"],
         src_id=src,
@@ -55,6 +63,7 @@ def _edge_commands(
         src_kind=G.nodes[src].get("kind", "") if src in G else "",
         dst_kind=G.nodes[dst].get("kind", "") if dst in G else "",
         actor=actor,
+        evidence=evidence,
     )
 
 
