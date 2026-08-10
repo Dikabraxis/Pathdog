@@ -3,14 +3,16 @@ import subprocess
 import sys
 import unittest
 import zipfile
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from pathdog.explanations import for_quickwin
-from pathdog.graph import build_graph
-from pathdog.loader import load_zip
 from pathdog.commands import get_commands
-from pathdog.pathfinder import find_paths
+from pathdog.explanations import for_quickwin
+from pathdog.graph import build_graph, build_raw_graph, prune_to_target
+from pathdog.loader import load_zip
+from pathdog.pathfinder import actionable_view, find_paths
 from pathdog.quickwins import collect_all
 from pathdog.triage import collect_findings
 from pathdog.weights import EDGE_WEIGHTS
@@ -59,6 +61,187 @@ def base_files(extra_rels=None, extra_files=None):
 
 
 class CoreTests(unittest.TestCase):
+    def test_pathfinding_is_fail_closed_for_context_and_unknown_edges(self):
+        nodes = [
+            {"id": "U1", "kind": "users", "props": {"name": "alice@corp.local"}},
+            {"id": "D1", "kind": "domains", "props": {"name": "corp.local"}},
+        ]
+        for rel in (
+            "Enroll",
+            "GetChanges",
+            "GetChangesAll",
+            "GetChangesInFilteredSet",
+            "WritePKINameFlag",
+            "WritePKIEnrollmentFlag",
+            "TrustedBy",
+            "SomethingBloodHoundMayAddLater",
+        ):
+            with self.subTest(rel=rel), redirect_stderr(StringIO()):
+                G = build_graph(nodes, [{"src": "U1", "dst": "D1", "type": rel}])
+                self.assertEqual(find_paths(G, "U1", "D1"), [])
+
+    def test_unknown_edge_warns_and_stays_context_only(self):
+        nodes = [
+            {"id": "U1", "kind": "users", "props": {"name": "alice@corp.local"}},
+            {"id": "D1", "kind": "domains", "props": {"name": "corp.local"}},
+        ]
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            G = build_graph(
+                nodes,
+                [{"src": "U1", "dst": "D1", "type": "FutureUnknownEdge"}],
+            )
+        self.assertIn("FutureUnknownEdge", stderr.getvalue())
+        self.assertEqual(G.graph["unknown_edge_types"], ["FutureUnknownEdge"])
+        self.assertFalse(actionable_view(G).has_edge("U1", "D1"))
+
+    def test_best_supported_traversable_relation_is_selected(self):
+        nodes = [
+            {"id": "U1", "kind": "users", "props": {"name": "alice@corp.local"}},
+            {"id": "U2", "kind": "users", "props": {"name": "bob@corp.local"}},
+        ]
+        G = build_graph(nodes, [
+            {"src": "U1", "dst": "U2", "type": "Enroll"},
+            {"src": "U1", "dst": "U2", "type": "GenericWrite"},
+        ])
+        attack = actionable_view(G)
+        self.assertEqual(attack["U1"]["U2"]["relation"], "GenericWrite")
+        self.assertEqual(attack["U1"]["U2"]["relations"], {"GenericWrite": 3})
+
+    def test_pruning_uses_only_the_attack_graph(self):
+        nodes = [
+            {"id": "U1", "kind": "users", "props": {"name": "alice@corp.local"}},
+            {"id": "D1", "kind": "domains", "props": {"name": "corp.local"}},
+        ]
+        G = build_graph(nodes, [{"src": "U1", "dst": "D1", "type": "Enroll"}])
+        pruned = prune_to_target(G, "D1")
+        self.assertNotIn("U1", pruned)
+        self.assertIn("D1", pruned)
+
+    def test_modern_traversable_but_unsupported_edge_is_blocked_and_warned(self):
+        nodes = [
+            {"id": "U1", "kind": "users", "props": {"name": "alice@corp.local"}},
+            {"id": "C1", "kind": "computers", "props": {"name": "gmsa.corp.local"}},
+        ]
+        stderr = StringIO()
+        with redirect_stderr(stderr):
+            G = build_graph(
+                nodes,
+                [{"src": "U1", "dst": "C1", "type": "ReadGMSAPassword"}],
+            )
+        self.assertIn("not yet implemented", stderr.getvalue())
+        self.assertEqual(find_paths(G, "U1", "C1"), [])
+
+    def test_dcsync_expands_split_group_rights_without_edge_explosion(self):
+        nodes = [
+            {"id": "U1", "kind": "users", "props": {"name": "u1@corp.local"}},
+            {"id": "U2", "kind": "users", "props": {"name": "u2@corp.local"}},
+            {"id": "G1", "kind": "groups", "props": {"name": "g1@corp.local"}},
+            {"id": "G2", "kind": "groups", "props": {"name": "g2@corp.local"}},
+            {"id": "G3", "kind": "groups", "props": {"name": "g3@corp.local"}},
+            {"id": "D1", "kind": "domains", "props": {"name": "corp.local"}},
+        ]
+        G = build_graph(nodes, [
+            {"src": "U1", "dst": "G1", "type": "MemberOf"},
+            {"src": "U1", "dst": "G2", "type": "MemberOf"},
+            {"src": "U2", "dst": "G3", "type": "MemberOf"},
+            {"src": "G3", "dst": "G2", "type": "MemberOf"},
+            {"src": "G1", "dst": "D1", "type": "GetChanges"},
+            {"src": "G2", "dst": "D1", "type": "GetChangesAll"},
+            {"src": "G3", "dst": "D1", "type": "GetChanges"},
+        ])
+        self.assertIn("DCSync", G["U1"]["D1"]["relations"])
+        self.assertIn("DCSync", G["G3"]["D1"]["relations"])
+        self.assertFalse(G.has_edge("U2", "D1"))
+        path = find_paths(G, "U2", "D1")[0]
+        self.assertEqual([edge["relation"] for edge in path.edges], ["MemberOf", "DCSync"])
+
+    def test_dcsync_group_membership_cycle_keeps_one_representative(self):
+        nodes = [
+            {"id": "G1", "kind": "groups", "props": {"name": "g1@corp.local"}},
+            {"id": "G2", "kind": "groups", "props": {"name": "g2@corp.local"}},
+            {"id": "D1", "kind": "domains", "props": {"name": "corp.local"}},
+        ]
+        G = build_graph(nodes, [
+            {"src": "G1", "dst": "G2", "type": "MemberOf"},
+            {"src": "G2", "dst": "G1", "type": "MemberOf"},
+            {"src": "G1", "dst": "D1", "type": "GetChanges"},
+            {"src": "G2", "dst": "D1", "type": "GetChangesAll"},
+        ])
+        representatives = [
+            principal
+            for principal in ("G1", "G2")
+            if G.has_edge(principal, "D1")
+            and "DCSync" in G[principal]["D1"]["relations"]
+        ]
+        self.assertEqual(representatives, ["G1"])
+
+    def test_sync_laps_targets_laps_computers_not_the_domain(self):
+        nodes = [
+            {"id": "U1", "kind": "users", "props": {"name": "alice@corp.local"}},
+            {"id": "D1", "kind": "domains", "props": {"name": "corp.local"}},
+            {
+                "id": "C1",
+                "kind": "computers",
+                "props": {"name": "ws01.corp.local", "haslaps": True, "domain": "corp.local"},
+            },
+            {
+                "id": "C2",
+                "kind": "computers",
+                "props": {"name": "ws02.corp.local", "haslaps": False, "domain": "corp.local"},
+            },
+        ]
+        G = build_graph(nodes, [
+            {"src": "U1", "dst": "D1", "type": "GetChanges"},
+            {"src": "U1", "dst": "D1", "type": "GetChangesInFilteredSet"},
+        ])
+        self.assertIn("SyncLAPSPassword", G["U1"]["C1"]["relations"])
+        self.assertFalse(G.has_edge("U1", "C2"))
+        self.assertNotIn("SyncLAPSPassword", G["U1"]["D1"]["relations"])
+        path = find_paths(G, "U1", "C1")[0]
+        self.assertEqual(path.edges[0]["relation"], "SyncLAPSPassword")
+
+    def test_dcsync_and_sync_laps_can_coexist(self):
+        nodes = [
+            {"id": "U1", "kind": "users", "props": {"name": "alice@corp.local"}},
+            {"id": "D1", "kind": "domains", "props": {"name": "corp.local"}},
+            {
+                "id": "C1",
+                "kind": "computers",
+                "props": {"name": "ws01.corp.local", "haslaps": True, "domain": "corp.local"},
+            },
+        ]
+        G = build_graph(nodes, [
+            {"src": "U1", "dst": "D1", "type": "GetChanges"},
+            {"src": "U1", "dst": "D1", "type": "GetChangesAll"},
+            {"src": "U1", "dst": "D1", "type": "GetChangesInFilteredSet"},
+        ])
+        self.assertIn("DCSync", G["U1"]["D1"]["relations"])
+        self.assertIn("SyncLAPSPassword", G["U1"]["C1"]["relations"])
+
+    def test_raw_graph_does_not_contain_synthesized_edges(self):
+        nodes = [
+            {"id": "U1", "kind": "users", "props": {"name": "alice@corp.local"}},
+            {"id": "D1", "kind": "domains", "props": {"name": "corp.local"}},
+        ]
+        G = build_raw_graph(nodes, [
+            {"src": "U1", "dst": "D1", "type": "GetChanges"},
+            {"src": "U1", "dst": "D1", "type": "GetChangesAll"},
+        ])
+        self.assertNotIn("DCSync", G["U1"]["D1"]["relations"])
+
+    def test_sync_laps_guidance_is_distinct_from_direct_laps_read(self):
+        direct, _ = get_commands(
+            "ReadLAPSPassword", "U1", "C1", "alice@corp.local",
+            "ws01.corp.local", "users", "computers", "alice@corp.local",
+        )
+        sync, _ = get_commands(
+            "SyncLAPSPassword", "U1", "C1", "alice@corp.local",
+            "ws01.corp.local", "users", "computers", "alice@corp.local",
+        )
+        self.assertNotEqual(direct.commands, sync.commands)
+        self.assertTrue(any("Sync-LAPS" in command for command in sync.commands))
+
     def test_loader_classifies_adcs_node_types(self):
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

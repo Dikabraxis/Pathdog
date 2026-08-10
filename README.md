@@ -1,8 +1,8 @@
 # Pathdog
 
-Parse a BloodHound ZIP export, find attack paths to Domain Admin, triage
-domain-wide findings, and print the exact commands to run at every hop.
-No Neo4j, no GUI, no depth limit.
+Parse a BloodHound ZIP export, find heuristic attack paths to Domain Admin,
+triage domain-wide findings, and print exploitation guidance for supported
+hops. No Neo4j, no GUI, no depth limit.
 
 ## Install
 
@@ -148,8 +148,8 @@ results, path nodes/edges, weights, relations, and node-visibility data when
 
 ### ADCS / ESC coverage
 
-Pathdog understands BloodHound ADCS edges and produces Certipy-oriented
-commands for:
+Pathdog consumes precomputed BloodHound ADCS attack-path edges and produces
+Certipy-oriented guidance for:
 
 - `ADCSESC1`, `ADCSESC3`, `ADCSESC4`
 - `ADCSESC6a`, `ADCSESC6b`
@@ -160,9 +160,14 @@ commands for:
 - coercion/relay edges:
   `CoerceAndRelayNTLMToSMB`, `CoerceAndRelayNTLMToLDAP`,
   `CoerceAndRelayNTLMToLDAPS`, `CoerceAndRelayNTLMToADCS`
-- supporting rights such as `Enroll`, `AutoEnroll`, `ManageCA`,
+- supporting rights such as `Enroll`, `ManageCA`,
   `ManageCertificates`, `DelegatedEnrollmentAgent`,
   `WritePKINameFlag`, and `WritePKIEnrollmentFlag`
+
+Pathdog does not yet derive ESC attack-path edges from raw CA/template
+properties. Context-only relations such as `Enroll`,
+`DelegatedEnrollmentAgent`, and `WritePKI*` are retained for reporting but
+never treated as standalone attack-path steps.
 
 ADCS object kinds such as certificate templates, enterprise CAs, root CAs,
 AIA CAs, and NTAuth stores are recognized when present in the dump.
@@ -263,8 +268,17 @@ and can be forced in captured output with `FORCE_COLOR=1`.
   supported.
 - Multiple ZIPs are merged into a single graph before pathfinding,
   duplicate nodes and edges are deduplicated automatically.
-- Pathdog synthesizes a `DCSync` edge when a principal holds both
-  `GetChanges` and `GetChangesAll` on the same domain. Either right alone
-  is deprioritized (it isn't exploitable without the pair).
+- Pathfinding is fail-closed and uses only BloodHound-traversable edge types
+  that Pathdog explicitly supports. Unknown, legacy, non-traversable, and
+  not-yet-supported relations remain available as context but cannot create
+  attack paths.
+- Pathdog synthesizes `DCSync` from effective `GetChanges` + `GetChangesAll`
+  rights, including rights inherited through nested groups.
+- Pathdog synthesizes `SyncLAPSPassword` from effective `GetChanges` +
+  `GetChangesInFilteredSet` rights to LAPS-enabled computers in the
+  corresponding domain.
+- Relationship classification is reviewed against BloodHound 9.5.1 and
+  SharpHound 2.14.0. Modern traversable edges without an implemented Pathdog
+  abuse model are reported and blocked rather than silently accepted.
 - Tests use small synthetic BloodHound ZIPs and run with the Python standard
   library test runner: `python3 -m unittest discover -s tests`.

@@ -4,8 +4,10 @@ from itertools import islice
 
 import networkx as nx
 
+from .schema import SUPPORTED_TRAVERSABLE_EDGES
+from .weights import DEFAULT_WEIGHT
+
 _STRUCTURAL = {"MemberOf", "Contains"}
-_REPL_HALF_RIGHTS = {"GetChanges", "GetChangesAll", "GetChangesInFilteredSet"}
 
 
 def _exploit_fingerprint(result: "PathResult") -> tuple:
@@ -17,25 +19,48 @@ def _exploit_fingerprint(result: "PathResult") -> tuple:
     )
 
 
-def _is_actionable_edge(data: dict) -> bool:
-    """Edge is non-actionable if its dominant relation is a replication
-    half-right and the (src,dst) pair was never synthesized into DCSync.
-    Used as the filter for `actionable_view`."""
-    if data.get("relation") in _REPL_HALF_RIGHTS:
-        return "DCSync" in (data.get("relations") or {})
-    return True
+def _traversable_relations(data: dict) -> dict[str, int]:
+    primary = data.get("relation", "Unknown")
+    relations = data.get("relations") or {
+        primary: data.get("weight", DEFAULT_WEIGHT)
+    }
+    return {
+        relation: weight
+        for relation, weight in relations.items()
+        if relation in SUPPORTED_TRAVERSABLE_EDGES
+    }
 
 
 def actionable_view(G: nx.DiGraph) -> nx.DiGraph:
-    """Return a lightweight view of G that hides non-actionable edges.
+    """Project the raw graph into a fail-closed BloodHound attack graph.
 
-    Pre-filtering before path-finding (rather than rejecting paths after the
-    fact) means dijkstra never wastes its budget enumerating dead-ends, and
-    we don't need an arbitrary scan cap to bound that work.
+    Context-only, unknown and not-yet-supported relationships are omitted.
+    When several relations connect the same pair, the lowest-weight supported
+    traversable relation becomes the primary relation for pathfinding.
     """
-    return nx.subgraph_view(
-        G, filter_edge=lambda u, v: _is_actionable_edge(G[u][v])
-    )
+    if G.graph.get("is_attack_graph"):
+        return G
+
+    attack = nx.DiGraph()
+    attack.graph.update(G.graph)
+    attack.graph["is_attack_graph"] = True
+    attack.add_nodes_from(G.nodes(data=True))
+
+    for src, dst, data in G.edges(data=True):
+        traversable = _traversable_relations(data)
+        if not traversable:
+            continue
+        relation, weight = min(
+            traversable.items(), key=lambda item: (item[1], item[0])
+        )
+        attack.add_edge(
+            src,
+            dst,
+            relation=relation,
+            weight=weight,
+            relations=traversable,
+        )
+    return attack
 
 
 class PathResult:
@@ -182,6 +207,7 @@ def find_intermediate_targets(
         return []
     excluded = excluded or set()
 
+    Gv = actionable_view(G)
     reachable: dict[str, int] = {source: 0}
     frontier = [source]
     while frontier:
@@ -190,7 +216,7 @@ def find_intermediate_targets(
             depth = reachable[n]
             if depth >= max_hops:
                 continue
-            for _, succ in G.out_edges(n):
+            for _, succ in Gv.out_edges(n):
                 if succ in reachable:
                     continue
                 reachable[succ] = depth + 1
@@ -207,7 +233,6 @@ def find_intermediate_targets(
         candidates.append((score, nid))
     candidates.sort(key=lambda x: (-x[0], reachable[x[1]]))
 
-    Gv = actionable_view(G)
     out: list[dict] = []
     for score, nid in candidates[:top_n]:
         if nid not in Gv:
@@ -437,7 +462,8 @@ def find_inbound_sources(
     """
     if target_node not in G:
         return []
-    R = G.reverse(copy=False)
+    Gv = actionable_view(G)
+    R = Gv.reverse(copy=False)
     try:
         ancestors = nx.descendants(R, target_node)
     except nx.NetworkXError:
@@ -474,7 +500,6 @@ def find_inbound_sources(
 
     scored.sort(key=lambda x: -x[0])
 
-    Gv = actionable_view(G)
     out: list[dict] = []
     for base_score, nid in scored[:top_n * 3]:
         if nid not in Gv or target_node not in Gv:

@@ -1,12 +1,21 @@
-"""NetworkX DiGraph builder with ancestor-based pruning."""
+"""Raw graph construction and attack-graph pruning."""
+
+import sys
 
 import networkx as nx
-from collections import defaultdict
-from .weights import EDGE_WEIGHTS, DEFAULT_WEIGHT
+
+from .postprocess import postprocess_graph
+from .schema import (
+    KNOWN_BLOODHOUND_EDGES,
+    LEGACY_CONTEXT_EDGES,
+    SUPPORTED_TRAVERSABLE_EDGES,
+    TRAVERSABLE_EDGES,
+)
+from .weights import DEFAULT_WEIGHT, EDGE_WEIGHTS
 
 
-def build_graph(nodes: list[dict], edges: list[dict]) -> nx.DiGraph:
-    """Build a directed graph from loader output."""
+def build_raw_graph(nodes: list[dict], edges: list[dict]) -> nx.DiGraph:
+    """Build a raw graph containing every collected relationship."""
     G = nx.DiGraph()
 
     for node in nodes:
@@ -14,9 +23,7 @@ def build_graph(nodes: list[dict], edges: list[dict]) -> nx.DiGraph:
         name = node["props"].get("name") or node["props"].get("Name") or nid
         G.add_node(nid, kind=node["kind"], name=name, props=node["props"])
 
-    # Track all relations between each (src,dst) so we can detect
-    # implicit DCSync = GetChanges + GetChangesAll on the same target.
-    multi_rels: dict[tuple[str, str], set[str]] = defaultdict(set)
+    relationship_types: set[str] = set()
 
     for edge in edges:
         src, dst, rtype = edge["src"], edge["dst"], edge["type"]
@@ -24,7 +31,7 @@ def build_graph(nodes: list[dict], edges: list[dict]) -> nx.DiGraph:
             G.add_node(src, kind="unknown", name=src, props={})
         if dst not in G:
             G.add_node(dst, kind="unknown", name=dst, props={})
-        multi_rels[(src, dst)].add(rtype)
+        relationship_types.add(rtype)
         w = EDGE_WEIGHTS.get(rtype, DEFAULT_WEIGHT)
         if G.has_edge(src, dst):
             G[src][dst]["relations"][rtype] = w
@@ -34,45 +41,42 @@ def build_graph(nodes: list[dict], edges: list[dict]) -> nx.DiGraph:
         else:
             G.add_edge(src, dst, relation=rtype, weight=w, relations={rtype: w})
 
-    # Synthesize DCSync edges: principal having both GetChanges and
-    # GetChangesAll on a domain (or the equivalent extended right pair).
-    # If only one of the pair is present, the edge alone is NOT exploitable —
-    # bump its weight to deprioritize it during pathfinding.
-    dcsync_w = EDGE_WEIGHTS.get("DCSync", 2)
-    inert_changes_w = 8  # replication rights alone — not actionable
-    repl_set = {"GetChanges", "GetChangesAll", "GetChangesInFilteredSet"}
-    for (src, dst), rels in multi_rels.items():
-        if "DCSync" in rels:
-            continue
-        # DCSync requires GetChanges + GetChangesAll. GetChangesInFilteredSet
-        # is the filtered-attribute-set right (RODC scenario) and does NOT
-        # substitute for GetChanges — treating it as such yields false positives.
-        has_changes = "GetChanges" in rels
-        has_changes_all = "GetChangesAll" in rels
-        is_domain = G.nodes[dst].get("kind") == "domains"
-        if has_changes and has_changes_all and is_domain:
-            if G.has_edge(src, dst):
-                G[src][dst]["relations"]["DCSync"] = dcsync_w
-                if G[src][dst]["weight"] >= dcsync_w:
-                    G[src][dst]["weight"] = dcsync_w
-                    G[src][dst]["relation"] = "DCSync"
-            else:
-                G.add_edge(src, dst, relation="DCSync", weight=dcsync_w,
-                           relations={"DCSync": dcsync_w})
-        elif (rels & repl_set) and is_domain:
-            # Any replication right alone (or any partial subset that doesn't
-            # cover both GetChanges + GetChangesAll) is NOT actionable for
-            # secrets dumping. Bump weight so pathfinder doesn't treat it as
-            # a cheap shortcut to the domain.
-            if G.has_edge(src, dst) and G[src][dst]["relation"] in repl_set:
-                G[src][dst]["weight"] = inert_changes_w
-                # Reflect the penalty in the relations map too so HTML alts
-                # don't suggest these are cheap.
-                for r in G[src][dst]["relations"]:
-                    if r in repl_set:
-                        G[src][dst]["relations"][r] = inert_changes_w
+    unknown = relationship_types - KNOWN_BLOODHOUND_EDGES - LEGACY_CONTEXT_EDGES
+    legacy = relationship_types & LEGACY_CONTEXT_EDGES
+    unsupported_traversable = (
+        relationship_types & TRAVERSABLE_EDGES
+    ) - SUPPORTED_TRAVERSABLE_EDGES
+    G.graph["relationship_types"] = sorted(relationship_types)
+    G.graph["unknown_edge_types"] = sorted(unknown)
+    G.graph["legacy_context_edge_types"] = sorted(legacy)
+    G.graph["unsupported_traversable_edge_types"] = sorted(unsupported_traversable)
+
+    if unknown:
+        print(
+            "[warn] Unknown relationship type(s) kept as context but blocked "
+            f"from pathfinding: {', '.join(sorted(unknown))}",
+            file=sys.stderr,
+        )
+    if unsupported_traversable:
+        print(
+            "[warn] BloodHound-traversable relationship type(s) not yet "
+            "implemented by Pathdog and blocked from pathfinding: "
+            f"{', '.join(sorted(unsupported_traversable))}",
+            file=sys.stderr,
+        )
+    if legacy:
+        print(
+            "[warn] Legacy/context-only relationship type(s) blocked from "
+            f"pathfinding: {', '.join(sorted(legacy))}",
+            file=sys.stderr,
+        )
 
     return G
+
+
+def build_graph(nodes: list[dict], edges: list[dict]) -> nx.DiGraph:
+    """Build the raw graph, then add supported post-processed attack edges."""
+    return postprocess_graph(build_raw_graph(nodes, edges))
 
 
 def resolve_target(G: nx.DiGraph, target_hint: str | None) -> str | None:
@@ -99,18 +103,24 @@ def resolve_target(G: nx.DiGraph, target_hint: str | None) -> str | None:
 
 
 def prune_to_target(G: nx.DiGraph, target: str) -> nx.DiGraph:
-    """Return a subgraph containing only nodes that can reach *target*.
+    """Return the attack subgraph containing nodes that can reach *target*.
 
     1. Reverse the DiGraph
     2. Compute nx.descendants(reversed, target) — equivalent to all nodes that
        can reach target in the original graph (no depth limit)
     3. Rebuild subgraph with those nodes + target
     """
-    R = G.reverse(copy=False)
+    # Import locally to avoid graph <-> pathfinder import cycles.
+    from .pathfinder import actionable_view
+
+    attack_graph = actionable_view(G)
+    if target not in attack_graph:
+        return attack_graph.subgraph([]).copy()
+    R = attack_graph.reverse(copy=False)
     # descendants of target in R == all nodes that can reach target in G
     reachable = nx.descendants(R, target)
     reachable.add(target)
-    return G.subgraph(reachable).copy()
+    return attack_graph.subgraph(reachable).copy()
 
 
 def graph_stats(G: nx.DiGraph, pruned: nx.DiGraph) -> dict:
