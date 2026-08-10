@@ -128,6 +128,50 @@ def _chained_domains(graph: nx.DiGraph, enterprise_ca: str) -> set[str]:
     return domains
 
 
+def _forest_domains(graph: nx.DiGraph, domain: str) -> set[str]:
+    forest = nx.Graph()
+    forest.add_node(domain)
+    for source, target in graph.edges:
+        if "SameForestTrust" in _rels(graph, source, target):
+            forest.add_edge(source, target)
+    return nx.node_connected_component(forest, domain)
+
+
+def _forest_dc_property(graph: nx.DiGraph, domain: str, prop: str) -> list[int]:
+    values: list[int] = []
+    for forest_domain in _forest_domains(graph, domain):
+        for dc, _ in graph.in_edges(forest_domain):
+            if "DCFor" not in _rels(graph, dc, forest_domain):
+                continue
+            value = _get(graph, dc, prop)
+            if value is not None:
+                try:
+                    values.append(int(value))
+                except (TypeError, ValueError):
+                    continue
+    return values
+
+
+def _schannel_enabled(graph: nx.DiGraph, template: str) -> bool:
+    explicit = _get(graph, template, "schannelauthenticationenabled")
+    if explicit is not None:
+        return _as_bool(explicit)
+    ekus = _get(graph, template, "effectiveekus")
+    if ekus is None:
+        return False
+    return not ekus or bool({"1.3.6.1.5.5.7.3.2", ANY_PURPOSE} & set(ekus))
+
+
+def _valid_schema_and_approval(graph: nx.DiGraph, template: str) -> bool:
+    required = ("requiresmanagerapproval", "schemaversion", "authorizedsignatures")
+    if any(_get(graph, template, key) is None for key in required):
+        return False
+    return not _as_bool(_get(graph, template, "requiresmanagerapproval")) and not (
+        float(_get(graph, template, "schemaversion")) > 1
+        and float(_get(graph, template, "authorizedsignatures")) > 0
+    )
+
+
 def synthesize_adcs(
     graph: nx.DiGraph,
     memberships: nx.DiGraph,
@@ -398,6 +442,125 @@ def synthesize_adcs(
                         "ADCSESC13",
                         {"ca": ca, "template": template},
                     )
+
+    # ESC6 uses a CA-wide SAN flag. Scenario A requires a template without the
+    # SID security extension; scenario B uses Schannel and therefore also
+    # requires UPN certificate mapping on a collected DC in the forest.
+    for ca in nodes_by_kind.get("enterprisecas", []):
+        if not _as_bool(_get(graph, ca, "isuserspecifiessanenabledcollected", False)):
+            continue
+        if not _as_bool(_get(graph, ca, "isuserspecifiessanenabled", False)):
+            continue
+        ca_enrollers = _effective(
+            graph, memberships, _direct_sources(graph, ca, {"Enroll"})
+        )
+        for template, _ in graph.in_edges(ca):
+            if "PublishedTo" not in _rels(graph, template, ca):
+                continue
+            if not _valid_schema_and_approval(graph, template):
+                continue
+            template_enrollers = _effective(
+                graph, memberships, _direct_sources(graph, template, ENROLL_RIGHTS)
+            )
+            principals = _filter_dns_users(
+                graph, template, template_enrollers & ca_enrollers
+            )
+            for domain in _chained_domains(graph, ca):
+                evidence = {"ca": ca, "template": template}
+                if (
+                    _get(graph, template, "nosecurityextension") is not None
+                    and _as_bool(_get(graph, template, "nosecurityextension"))
+                    and _as_bool(_get(graph, template, "authenticationenabled", False))
+                ):
+                    for principal in principals:
+                        add(principal, domain, "ADCSESC6a", evidence)
+                upn_mapping = any(
+                    value != -1 and value & 4
+                    for value in _forest_dc_property(
+                        graph, domain, "certificatemappingmethodsraw"
+                    )
+                )
+                if _schannel_enabled(graph, template) and upn_mapping:
+                    for principal in principals:
+                        add(principal, domain, "ADCSESC6b", evidence)
+
+    # ESC9/10 require control of a victim that can enroll. The weak-binding
+    # registry inputs are privileged collection data, so absent values block
+    # synthesis instead of assuming a vulnerable Windows default.
+    control_a = {
+        "GenericAll",
+        "GenericWrite",
+        "Owns",
+        "WriteOwner",
+        "WriteDacl",
+        "WritePublicInformation",
+    }
+    control_b = control_a - {"WritePublicInformation"}
+    for template in published:
+        if not _valid_schema_and_approval(graph, template):
+            continue
+        if _get(graph, template, "enrolleesuppliessubject") is None or _as_bool(
+            _get(graph, template, "enrolleesuppliessubject")
+        ):
+            continue
+        for _, ca in graph.out_edges(template):
+            if "PublishedTo" not in _rels(graph, template, ca):
+                continue
+            victims = _effective(
+                graph, memberships, _direct_sources(graph, template, ENROLL_RIGHTS)
+            ) & _effective(graph, memberships, _direct_sources(graph, ca, {"Enroll"}))
+            for domain in _chained_domains(graph, ca):
+                weak_binding = any(
+                    value in {-1, 0, 1}
+                    for value in _forest_dc_property(
+                        graph, domain, "strongcertificatebindingenforcementraw"
+                    )
+                )
+                upn_mapping = any(
+                    value != -1 and value & 4
+                    for value in _forest_dc_property(
+                        graph, domain, "certificatemappingmethodsraw"
+                    )
+                )
+                evidence = {"ca": ca, "template": template}
+                variants = (
+                    (
+                        "a",
+                        _as_bool(_get(graph, template, "subjectaltrequireupn", False))
+                        or _as_bool(_get(graph, template, "subjectaltrequirespn", False)),
+                        control_a,
+                    ),
+                    (
+                        "b",
+                        _as_bool(_get(graph, template, "subjectaltrequiredns", False)),
+                        control_b,
+                    ),
+                )
+                for suffix, required_name, control_rights in variants:
+                    if not required_name:
+                        continue
+                    eligible_victims = victims
+                    if suffix == "a":
+                        eligible_victims = _filter_dns_users(graph, template, victims)
+                    attackers = {
+                        attacker
+                        for victim in eligible_victims
+                        for attacker, _ in graph.in_edges(victim)
+                        if _rels(graph, attacker, victim) & control_rights
+                        and graph.nodes[attacker].get("kind")
+                        in {"users", "groups", "computers"}
+                        and (suffix == "a" or graph.nodes[victim].get("kind") == "computers")
+                    }
+                    if (
+                        _as_bool(_get(graph, template, "authenticationenabled", False))
+                        and _as_bool(_get(graph, template, "nosecurityextension", False))
+                        and weak_binding
+                    ):
+                        for attacker in attackers:
+                            add(attacker, domain, f"ADCSESC9{suffix}", evidence)
+                    if _schannel_enabled(graph, template) and upn_mapping:
+                        for attacker in attackers:
+                            add(attacker, domain, f"ADCSESC10{suffix}", evidence)
 
     # CA private-key compromise (GoldenCert) starts from its hosting computer.
     for computer in nodes_by_kind.get("computers", []):

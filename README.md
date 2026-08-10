@@ -156,7 +156,7 @@ results, path nodes/edges, weights, relations, and node-visibility data when
 
 Pathdog derives AD CS topology relationships from current raw SharpHound
 Version 6 CA/template data. It conservatively synthesizes ESC1, ESC3, ESC4,
-ESC13 and GoldenCert when all required properties and effective enrollment
+ESC6, ESC9, ESC10, ESC13 and GoldenCert when all required properties and effective enrollment
 rights are present. The generated edge retains its CA/template evidence so
 reports can produce Certipy-oriented commands with the actual object names.
 
@@ -176,9 +176,8 @@ guidance for:
   `ManageCertificates`, `DelegatedEnrollmentAgent`,
   `WritePKINameFlag`, and `WritePKIEnrollmentFlag`
 
-ESC6, ESC9 and ESC10 are currently consumed when already calculated by
-BloodHound; Pathdog does not synthesize those families unless the necessary
-forest/DC certificate-mapping inputs are represented. This is deliberate:
+ESC6, ESC9 and ESC10 synthesis requires the necessary privileged
+forest/DC certificate-mapping registry inputs. This is deliberate:
 missing inputs fail closed instead of producing an optimistic attack path.
 Context-only relations such as `Enroll`,
 `DelegatedEnrollmentAgent`, and `WritePKI*` are retained for reporting but

@@ -12,7 +12,7 @@ All notable changes to Pathdog are documented here.
   `BlockOwnerImplicitRights` handling.
 - AD CS topology synthesis for `EnterpriseCAFor`, `IssuedSignedBy`,
   `TrustedForNTAuth`, `ExtendedByPolicy` and `EnrollOnBehalfOf`.
-- Conservative raw-data synthesis for ESC1, ESC3, ESC4, ESC13 and
+- Conservative raw-data synthesis for ESC1, ESC3, ESC4, ESC6, ESC9, ESC10, ESC13 and
   `GoldenCert`, including group-effective enrollment rights.
 - Calculated-edge evidence so reports can place the actual CA/template names
   into Certipy commands.

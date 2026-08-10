@@ -120,6 +120,31 @@ class CoreTests(unittest.TestCase):
         ])
         self.assertFalse(graph.has_edge("U1", "D1"))
 
+    def test_adcs_registry_postprocessing_derives_esc6_9_and_10(self):
+        nodes = [
+            {"id": "A", "kind": "users", "props": {"name": "attacker@corp.local"}},
+            {"id": "V", "kind": "users", "props": {"name": "victim@corp.local"}},
+            {"id": "D", "kind": "domains", "props": {"name": "corp.local"}},
+            {"id": "DC", "kind": "computers", "props": {"name": "DC01.corp.local", "certificatemappingmethodsraw": 4, "strongcertificatebindingenforcementraw": 1}},
+            {"id": "CA", "kind": "enterprisecas", "props": {"name": "CORP-CA@corp.local", "certthumbprint": "AA", "isuserspecifiessanenabledcollected": True, "isuserspecifiessanenabled": True}},
+            {"id": "R", "kind": "rootcas", "props": {"name": "ROOT@corp.local", "certthumbprint": "AA"}},
+            {"id": "T", "kind": "certtemplates", "props": {"name": "WEAK@corp.local", "domainsid": "S1", "requiresmanagerapproval": False, "authenticationenabled": True, "enrolleesuppliessubject": False, "nosecurityextension": True, "subjectaltrequireupn": True, "subjectaltrequirespn": False, "subjectaltrequiredns": False, "schemaversion": 2, "authorizedsignatures": 0, "effectiveekus": ["1.3.6.1.5.5.7.3.2"]}},
+        ]
+        edges = [
+            {"src": "R", "dst": "D", "type": "RootCAFor"},
+            {"src": "DC", "dst": "D", "type": "DCFor"},
+            {"src": "T", "dst": "CA", "type": "PublishedTo"},
+            {"src": "V", "dst": "T", "type": "Enroll"},
+            {"src": "V", "dst": "CA", "type": "Enroll"},
+            {"src": "A", "dst": "V", "type": "GenericWrite"},
+        ]
+        graph = build_graph(nodes, edges)
+        self.assertIn("ADCSESC6a", graph["V"]["D"]["relations"])
+        self.assertIn("ADCSESC6b", graph["V"]["D"]["relations"])
+        self.assertIn("ADCSESC9a", graph["A"]["D"]["relations"])
+        self.assertIn("ADCSESC10a", graph["A"]["D"]["relations"])
+        self.assertNotIn("ADCSESC9b", graph["A"]["D"]["relations"])
+
     def test_loader_adds_explicit_and_embedded_relationship_sources(self):
         with TemporaryDirectory() as tmp:
             zpath = Path(tmp) / "combined.zip"
